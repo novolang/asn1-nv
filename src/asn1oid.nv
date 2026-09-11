@@ -1,0 +1,247 @@
+// asn1oid — OBJECT IDENTIFIERs, and the arc arithmetic that makes them
+// bytes.
+//
+// Every body is a `todo()`.  The signatures are the design, and the
+// compiler checks them as claims; see the README for the stamp.
+//
+// AN OID IS A PATH IN A GLOBAL TREE, written as arcs: `1.2.840.10045.
+// 2.1` is ISO, member body, US, ANSI X9.62, key type, EC public key.
+// Nobody can allocate one but the registrar for the arc above it, which
+// is why an OID identifies an algorithm with no ambiguity anywhere in
+// the world and why every certificate is full of them.
+//
+// TWO RULES TURN ARCS INTO BYTES, and the second is the one everybody
+// gets wrong.
+//
+// Each arc is BASE 128, most significant group first, with the high bit
+// set on every byte but the last.  Same shape as a length's long form
+// and a different rule, so a parser that reused one for the other reads
+// plausible nonsense.
+//
+// The FIRST TWO ARCS SHARE ONE VALUE: `40 * first + second`.  The first
+// arc is 0, 1 or 2 and nothing else.  Under 0 and 1 the second arc is
+// below 40, so the packing is unambiguous; under 2 THERE IS NO LIMIT,
+// so `2.100` packs to 180 and reading it back as `180 / 40` gives 4 —
+// which is not an arc anything has.  `first_arc` caps the division at
+// 2, and `second_arc` takes what is left.  A parser without that cap
+// misreads every OID under the joint-ISO-ITU-T arc, which includes
+// every X.500 attribute type in a certificate's subject.
+//
+// NO DEVICE CLAIM FOR THIS MODULE, and `asn1tag.arc_scan` is why: the
+// arc arithmetic a device needs is there, in integers, and this module
+// is that arithmetic with `Bytes` and `Str` attached.
+
+use std.bytes
+use asn1tag
+
+// An object identifier: its arcs, in order, root first.
+//
+// A list rather than the encoded bytes because comparing two OIDs is
+// comparing two paths, and because the arcs are what a person reads.
+// `encoded_len` and `encode_into` are the way back to bytes, and
+// nothing here holds both.
+pub struct AsnOid
+    arcs: [Int]
+
+// An OID from its arcs.
+//
+// ```novo
+// use asn1oid
+//
+// fn main() [io]
+//     println(asn1oid.oid_text(asn1oid.oid([1, 2, 840, 10045, 2, 1])))
+//     // 1.2.840.10045.2.1
+// ```
+pub fn oid(arcs: [Int]) -> AsnOid []
+    todo("asn1oid.oid")
+
+// The arcs, in order.
+pub fn arcs_of(o: AsnOid) -> [Int] []
+    todo("asn1oid.arcs_of")
+
+// How many arcs there are.
+pub fn arc_count(o: AsnOid) -> Int []
+    todo("asn1oid.arc_count")
+
+// The arc at `i`, or -1 when `i` is outside the OID.
+//
+// -1 rather than an optional because every caller of this is
+// arithmetic that would unwrap immediately, and no arc is negative.
+pub fn arc_at(o: AsnOid, i: Int) -> Int []
+    todo("asn1oid.arc_at")
+
+// The dotted text: `"1.2.840.10045.2.1"`.
+pub fn oid_text(o: AsnOid) -> Str []
+    todo("asn1oid.oid_text")
+
+// The OID a dotted text names, or `None` when the text is not
+// non-empty decimal arcs separated by dots.
+//
+// No validity check beyond the grammar: `oid_of_text("9.9.9")` answers
+// an OID, and `encode_into` is what refuses it, because a first arc
+// above 2 is an ENCODING rule rather than a syntax one.
+pub fn oid_of_text(text: Str) -> ?AsnOid []
+    todo("asn1oid.oid_of_text")
+
+// Whether `o` begins with every arc of `prefix`.
+//
+// What a caller testing "is this under the X9.62 arc" asks, and what a
+// certificate parser uses to group extension OIDs.
+//
+// ```novo
+// use asn1oid
+//
+// fn main() [io]
+//     let ec = asn1oid.oid([1, 2, 840, 10045, 2, 1])
+//     println("${asn1oid.starts_with(ec, asn1oid.oid([1, 2, 840]))}")   // true
+// ```
+pub fn starts_with(o: AsnOid, prefix: AsnOid) -> Bool []
+    todo("asn1oid.starts_with")
+
+// Whether two OIDs are the same path.
+pub fn equals(a: AsnOid, b: AsnOid) -> Bool []
+    todo("asn1oid.equals")
+
+// ── bytes ───────────────────────────────────────────────────────────
+
+// How many bytes this OID's CONTENT occupies, header excluded.
+//
+// The first two arcs packed into one value, then one group of seven
+// bits per arc.  `AsnBadOidArcs` for fewer than two arcs, a first arc
+// above 2, or a second arc above 39 under a first arc of 0 or 1.
+pub fn encoded_len(o: AsnOid) -> Result<Int, AsnEncodeError> []
+    todo("asn1oid.encoded_len")
+
+// Write this OID's content into the caller's buffer, and answer the
+// byte count.
+//
+// Content only: `asn1write.write_oid_into` is the one that puts the
+// `06` and the length in front of it.
+pub fn encode_into(o: AsnOid, mut dst: Cursor) -> Result<Int, AsnEncodeError> []
+    todo("asn1oid.encode_into")
+
+// The OID a content byte string names.
+//
+// `AsnBadOid` for empty content, for a last byte whose continuation bit
+// is set, or for an arc that began with a `0x80` padding byte — DER
+// forbids the padding because it would make two encodings of one arc.
+//
+// ```novo
+// use std.bytes
+// use asn1oid
+//
+// fn main() [io]
+//     // 2a 86 48 ce 3d 02 01 — the EC public key OID's content.
+//     let content = bytes.from_hex("2a8648ce3d0201") ?? bytes.zeros(0)
+//     match asn1oid.decode(content)
+//         Ok(o)  => println(asn1oid.oid_text(o))   // 1.2.840.10045.2.1
+//         Err(e) => println(e.message())
+// ```
+pub fn decode(content: Bytes) -> Result<AsnOid, AsnDecodeError> []
+    todo("asn1oid.decode")
+
+// ── the OIDs the crypto tier needs, by name ─────────────────────────
+
+// `1.2.840.10045.2.1` — `id-ecPublicKey`.  The algorithm of every
+// SubjectPublicKeyInfo holding an elliptic-curve key, with the CURVE in
+// the parameters beside it.
+pub fn oid_ec_public_key() -> AsnOid []
+    todo("asn1oid.oid_ec_public_key")
+
+// `1.2.840.10045.3.1.7` — `prime256v1`, which is NIST P-256 and
+// secp256r1 and the same curve under three names.  p256-nv's.
+pub fn oid_prime256v1() -> AsnOid []
+    todo("asn1oid.oid_prime256v1")
+
+// `1.3.132.0.34` — `secp384r1`, P-384.  Named so that a parser can tell
+// a caller its key is a curve this grid has no package for, rather than
+// handing over bytes of the wrong length.
+pub fn oid_secp384r1() -> AsnOid []
+    todo("asn1oid.oid_secp384r1")
+
+// `1.3.101.112` — `id-Ed25519`.  ed25519-nv's, and the OID that is its
+// own algorithm: an Ed25519 key's `parameters` field is ABSENT, not
+// NULL, which is the difference RFC 8410 spells out and a writer that
+// wrote `05 00` would get wrong.
+pub fn oid_ed25519() -> AsnOid []
+    todo("asn1oid.oid_ed25519")
+
+// `1.3.101.110` — `id-X25519`.  x25519-nv's, same absent-parameters
+// rule.
+pub fn oid_x25519() -> AsnOid []
+    todo("asn1oid.oid_x25519")
+
+// `1.2.840.113549.1.1.1` — `rsaEncryption`.  There is no RSA row on the
+// grid, and the OID is here so a parser can say "this is an RSA key and
+// nothing here reads one" rather than failing obscurely.
+pub fn oid_rsa_encryption() -> AsnOid []
+    todo("asn1oid.oid_rsa_encryption")
+
+// `2.16.840.1.101.3.4.2.1` — `id-sha256`.  crypto-nv's digest.
+pub fn oid_sha256() -> AsnOid []
+    todo("asn1oid.oid_sha256")
+
+// `1.2.840.10045.4.3.2` — `ecdsa-with-SHA256`.  The signature
+// algorithm on a P-256 certificate, and what jwt-nv's ES256 signs
+// with.
+pub fn oid_ecdsa_with_sha256() -> AsnOid []
+    todo("asn1oid.oid_ecdsa_with_sha256")
+
+// `1.2.840.113549.1.1.11` — `sha256WithRSAEncryption`.  Named for the
+// same reason as `oid_rsa_encryption`.
+pub fn oid_sha256_with_rsa() -> AsnOid []
+    todo("asn1oid.oid_sha256_with_rsa")
+
+// `2.5.4.3` — `id-at-commonName`, the `CN=` of a distinguished name.
+pub fn oid_common_name() -> AsnOid []
+    todo("asn1oid.oid_common_name")
+
+// `2.5.4.6` — `id-at-countryName`, `C=`.
+pub fn oid_country_name() -> AsnOid []
+    todo("asn1oid.oid_country_name")
+
+// `2.5.4.10` — `id-at-organizationName`, `O=`.
+pub fn oid_organization_name() -> AsnOid []
+    todo("asn1oid.oid_organization_name")
+
+// `2.5.4.11` — `id-at-organizationalUnitName`, `OU=`.
+pub fn oid_organizational_unit_name() -> AsnOid []
+    todo("asn1oid.oid_organizational_unit_name")
+
+// `2.5.29.15` — `id-ce-keyUsage`, the extension that says what a key
+// may be used for.
+pub fn oid_key_usage() -> AsnOid []
+    todo("asn1oid.oid_key_usage")
+
+// `2.5.29.17` — `id-ce-subjectAltName`, where a certificate's DNS names
+// actually live.  A reader that matched a hostname against the common
+// name and not this one has been wrong since 2011.
+pub fn oid_subject_alt_name() -> AsnOid []
+    todo("asn1oid.oid_subject_alt_name")
+
+// `2.5.29.19` — `id-ce-basicConstraints`, which says whether a
+// certificate may sign others.
+pub fn oid_basic_constraints() -> AsnOid []
+    todo("asn1oid.oid_basic_constraints")
+
+// `2.5.29.37` — `id-ce-extKeyUsage`.
+pub fn oid_ext_key_usage() -> AsnOid []
+    todo("asn1oid.oid_ext_key_usage")
+
+// The short name this package knows for an OID — `"ecPublicKey"`,
+// `"CN"`, `"id-ce-subjectAltName"` — or `""` for one it does not.
+//
+// `""` rather than the dotted text, so that a caller printing a name
+// can tell "this is the common name attribute" from "this is
+// 1.2.3.4.5" and choose what to show.  A short list on purpose: an OID
+// registry is not this package's job, and a wrong name is worse than
+// no name.
+//
+// ```novo
+// use asn1oid
+//
+// fn main() [io]
+//     println(asn1oid.oid_name(asn1oid.oid_common_name()))   // CN
+// ```
+pub fn oid_name(o: AsnOid) -> Str []
+    todo("asn1oid.oid_name")

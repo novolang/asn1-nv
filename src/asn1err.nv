@@ -1,0 +1,192 @@
+// asn1err — every way a DER document can refuse to be read or written.
+//
+// Every body is a `todo()`.  The signatures are the design, and the
+// compiler checks them as claims; see the README for the stamp.
+//
+// TWO TYPES, BECAUSE THERE ARE TWO AUDIENCES
+//
+// `AsnDecodeError` is "these bytes are not that structure".  It is the
+// only one a network peer or a file can cause, so every variant carries
+// a byte offset: a certificate is a hundred nested values and the
+// question a person has is always which one.
+//
+// `AsnEncodeError` is "you asked me to write something DER does not
+// allow" — an OID with one arc, a PrintableString holding an `@`, a
+// length that does not fit the caller's buffer.  That is the calling
+// program's fault, it has no offset into anything that arrived, and a
+// caller matching one enum for both would be writing arms it can never
+// reach.
+//
+// WHY THE DER REFUSALS ARE THEIR OWN VARIANTS.  A non-minimal length, a
+// leading zero on a positive INTEGER, an indefinite length, an unsorted
+// SET OF — every one of them is a second valid encoding of a value that
+// already has one, and a signature is computed over BYTES.  Two
+// encodings of one value is how a signature checks out over something
+// the reader did not read.  So they are named rather than folded into
+// a general "malformed", and `AsnLimits.ber_tolerant` is the one switch
+// that turns the readable ones into acceptance.
+
+// AsnDecodeError is why a byte string is not the structure it was read
+// as.
+//
+// `at` is the offset from the first byte the reader was given, so two
+// tools reading the same file name the same byte.
+pub enum AsnDecodeError
+    // The input ended inside a header or a value: `need` more bytes
+    // would have finished it, when that is known, and 1 when it is not.
+    AsnTruncated(at: Int, need: Int)
+    // A length announced more bytes than the document has left.
+    AsnLengthOverrun(at: Int, len: Int, left: Int)
+    // A length's long form said it occupied 127 bytes, which BER
+    // reserves and nothing may use.
+    AsnReservedLengthForm(at: Int)
+    // A length that does not fit a signed integer.
+    AsnLengthNotRepresentable(at: Int)
+    // A length written in the long form that the short form could have
+    // held, or with a leading zero byte.  DER requires the shortest
+    // encoding; BER does not, and `ber_tolerant` accepts it.
+    AsnNonMinimalLength(at: Int)
+    // An indefinite length, `0x80`.  BER only, and DER forbids it
+    // because the same value then has two encodings.
+    AsnIndefiniteLength(at: Int)
+    // An end-of-contents marker where no indefinite-length value is
+    // open.
+    AsnStrayEndOfContents(at: Int)
+    // A high-tag-number form that ran past what an `Int` can hold, or
+    // that began with a `0x80` padding byte.
+    AsnBadTagNumber(at: Int)
+    // Nesting went past the reader's limit.  ASN.1's nesting is
+    // unbounded by specification and every implementation bounds it
+    // anyway; `asn1read.default_limits` is where the number is.
+    AsnDepthExceeded(at: Int, limit: Int)
+    // The value at this offset is not the tag the caller expected.
+    // `want` and `got` are tag numbers within the class named.
+    AsnUnexpectedTag(at: Int, want: Int, got: Int)
+    // A primitive value where a constructed one was required, or the
+    // reverse.  SEQUENCE and SET are always constructed; INTEGER and
+    // OBJECT IDENTIFIER are always primitive in DER.
+    AsnWrongConstruction(at: Int, constructed: Bool)
+    // A BOOLEAN whose content byte was neither `0x00` nor `0xff`.  BER
+    // reads any non-zero as true; DER admits `0xff` alone, and
+    // `ber_tolerant` is the switch.
+    AsnBadBoolean(at: Int, byte: Int)
+    // An INTEGER with a redundant leading `0x00` or `0xff` byte, which
+    // DER's shortest-form rule forbids.
+    AsnNonMinimalInteger(at: Int)
+    // An INTEGER whose content is longer than a novo-lang `Int` can
+    // hold.  Not a fault in the document — an RSA modulus is 257 bytes
+    // and perfectly legal — so `asn1univ.integer_bytes_at` is the
+    // function that answers one, and this is what `integer_at` says
+    // when the caller asked for a number.
+    AsnIntegerTooLarge(at: Int, len: Int)
+    // A BIT STRING whose first content byte, the unused-bit count, was
+    // above 7 — or was non-zero on an empty bit string.
+    AsnBadBitString(at: Int, unused: Int)
+    // A NULL with content in it.  `05 00` is the only NULL there is.
+    AsnNullWithContent(at: Int, len: Int)
+    // An OBJECT IDENTIFIER with no content, or whose last arc byte had
+    // its continuation bit set, or whose arc began with a `0x80`
+    // padding byte.
+    AsnBadOid(at: Int)
+    // A string whose bytes are not what its type allows: non-UTF-8 in a
+    // UTF8String, a byte above `0x7f` in an IA5String, a character
+    // outside the restricted alphabet in a PrintableString.
+    AsnBadStringBytes(at: Int, byte: Int)
+    // A UTCTime or GeneralizedTime that is not in the fixed grammar, or
+    // that names a date nobody has — the 31st of February.
+    AsnBadTime(at: Int, text: Str)
+    // A UTCTime or GeneralizedTime with no `Z`.  DER requires UTC; a
+    // local-time offset is legal BER and means a certificate's validity
+    // depends on where it is read.
+    AsnTimeNotUtc(at: Int)
+    // A SET OF whose elements are not in ascending order of their
+    // encodings, which DER requires and BER does not.
+    AsnSetOfNotSorted(at: Int)
+    // The document was longer than the reader's byte limit.
+    AsnDocumentTooLarge(at: Int, len: Int, limit: Int)
+    // The whole input was read as one value and bytes were left over.
+    AsnTrailingBytes(at: Int, left: Int)
+    // A structure this package knows was missing a field the standard
+    // requires: a SubjectPublicKeyInfo with no algorithm, a certificate
+    // with no validity.  `what` is the field's name from the standard's
+    // own ASN.1 module, so a reader can find it.
+    AsnMissingField(at: Int, what: Str)
+    // A structure whose version number this package does not read — an
+    // X.509 v4 certificate, a PKCS#8 version above 1.
+    AsnUnsupportedVersion(at: Int, version: Int)
+
+// message renders the refusal as one line of prose, with the offset in
+// it.
+//
+// `Result<_, AsnDecodeError>` requires this impl: SPEC § 3.4 admits a
+// `Result` error type only if it implements `Error`.
+impl Error for AsnDecodeError
+    // Answer the one-line report: what was wrong, and where.
+    //
+    // ```novo
+    // use asn1err
+    //
+    // fn main() [io]
+    //     let e = AsnIndefiniteLength(at: 1)
+    //     println(e.message())
+    //     // asn1: indefinite length at byte 1 — DER requires a definite length
+    // ```
+    fn message(self) -> Str
+        todo("asn1err.AsnDecodeError.message")
+
+// The byte a decode refusal stopped at.
+//
+// Every variant has one, so this is total and needs no sentinel.
+pub fn decode_offset(e: AsnDecodeError) -> Int []
+    todo("asn1err.decode_offset")
+
+// Whether this refusal is one `AsnLimits.ber_tolerant` turns into
+// acceptance.
+//
+// The five that BER allows and DER does not: a non-minimal length, an
+// indefinite length, a boolean that is not `0xff`, a non-minimal
+// integer, an unsorted SET OF.  Named as a predicate so that a caller
+// deciding whether to re-read a document in tolerant mode can ask
+// rather than match five arms.
+//
+// ```novo
+// use asn1err
+//
+// fn main() [io]
+//     let a = asn1err.is_der_only(AsnIndefiniteLength(at: 1))
+//     let b = asn1err.is_der_only(AsnTruncated(at: 1, need: 2))
+//     println("${a} ${b}")   // true false
+// ```
+pub fn is_der_only(e: AsnDecodeError) -> Bool []
+    todo("asn1err.is_der_only")
+
+// AsnEncodeError is why something this package was asked to write
+// would not have been legal DER.
+pub enum AsnEncodeError
+    // The caller's buffer had `left` bytes and the value needed `need`.
+    // Every `_into` function answers this rather than growing anything.
+    AsnBufferTooSmall(need: Int, left: Int)
+    // An OBJECT IDENTIFIER with fewer than two arcs, a first arc above
+    // 2, or a second arc above 39 under a first arc of 0 or 1.
+    AsnBadOidArcs(what: Str)
+    // A negative arc, a negative length, a negative tag number.
+    AsnNegativeValue(what: Str)
+    // A string with a byte its declared type does not allow.
+    AsnStringNotAllowed(tag: Int, at: Int)
+    // A BIT STRING with an unused-bit count above 7.
+    AsnBadUnusedBits(unused: Int)
+    // A civil date outside what UTCTime or GeneralizedTime can write —
+    // a year before 0 or after 9999, and for UTCTime anything outside
+    // 1950 to 2049.
+    AsnTimeNotWritable(year: Int)
+    // A value nested deeper than the writer's limit.
+    AsnEncodeDepthExceeded(limit: Int)
+    // `done` was called with a constructed value still open.
+    AsnUnclosedValue(depth: Int)
+
+// message renders the refusal as one line of prose.
+impl Error for AsnEncodeError
+    // Answer the one-line report.  There is no offset: nothing arrived,
+    // so there is nothing to point at.
+    fn message(self) -> Str
+        todo("asn1err.AsnEncodeError.message")

@@ -1,0 +1,395 @@
+// asn1tag — the identifier and length octets, as arithmetic that
+// allocates nothing, holds no buffer, and builds for a
+// microcontroller.
+//
+// Every body is a `todo()`.  The signatures are the design, and the
+// compiler checks them as claims; see the README for the stamp.
+//
+// WHY THERE IS A SECOND MODULE.  `asn1read`, `asn1univ` and `asn1pkix`
+// speak `Bytes`, `Str` and `Cursor`, and none of those links at
+// `@tier(embedded)`: the embedded runtime defines no `novo_bytes_*`
+// symbol, so a device that called one would fail at the linker rather
+// than at the type checker.  One host-only function anywhere in a
+// compilation unit is an undefined symbol on a device whether or not
+// the firmware calls it, so the half a device uses is its own module
+// and takes and returns integers.
+//
+// WHY A HEADER CODEC IS ENOUGH TO BE USEFUL ON A DEVICE.  Every ASN.1
+// value is the same three parts: an IDENTIFIER saying what it is, a
+// LENGTH saying how long the content is, and the CONTENT.  A device
+// that has been provisioned with a public key and is handed a
+// certificate walks headers — into the TBSCertificate, into the
+// SubjectPublicKeyInfo, into the AlgorithmIdentifier — compares one
+// OBJECT IDENTIFIER, and takes the bytes it finds.  All of that is
+// header arithmetic and arc comparison, and none of it needs a heap.
+//
+// THE SCAN IS BYTE AT A TIME because a device reading from a UART or
+// an SPI flash has one byte and nothing else.  A caller with a whole
+// buffer uses `asn1read` and never meets this module.
+//
+// THE TWO LENGTH FORMS.  A length below 128 is one byte and IS that
+// number.  Anything else is a byte whose top bit is set and whose low
+// seven bits say how many length bytes follow, big-endian.  `0x80`
+// alone is the INDEFINITE form: BER only, content until an
+// end-of-contents pair, and DER forbids it — which is why
+// `AsnHeadScan` carries `indefinite` as a fact rather than refusing it
+// here, and the reader is what applies the rule.
+
+// The universal class: the types the standard itself defines — INTEGER,
+// SEQUENCE, OBJECT IDENTIFIER.  Class code 0.
+pub fn class_universal() -> Int []
+    todo("asn1tag.class_universal")
+
+// The application class: types a standard built on ASN.1 defines for
+// itself.  Class code 1, and rare in PKIX.
+pub fn class_application() -> Int []
+    todo("asn1tag.class_application")
+
+// The context-specific class: a tag whose meaning comes from where it
+// sits.  Class code 2, and the one PKIX uses everywhere — `[0]` for a
+// certificate's version, `[3]` for its extensions.
+pub fn class_context() -> Int []
+    todo("asn1tag.class_context")
+
+// The private class: class code 3, and effectively unused.
+pub fn class_private() -> Int []
+    todo("asn1tag.class_private")
+
+// The bit in an identifier octet that says the content is itself a
+// sequence of tag-length-values rather than raw bytes: `0x20`.
+//
+// ```novo
+// use asn1tag
+//
+// fn main() [io]
+//     println("${asn1tag.constructed_bit()}")   // 32
+// ```
+pub fn constructed_bit() -> Int []
+    todo("asn1tag.constructed_bit")
+
+// The identifier octet for a class, a constructed flag and a tag
+// number below 31.
+//
+// The class in the top two bits, the constructed flag at `0x20`, the
+// number in the low five.  `SEQUENCE` is universal, constructed, 16 —
+// which is `0x30`, the byte every DER document a reader has ever seen
+// begins with.
+//
+// ```novo
+// use asn1tag
+//
+// fn main() [io]
+//     let seq = asn1tag.identifier_byte(asn1tag.class_universal(), true, asn1tag.tag_sequence())
+//     println("${seq}")   // 48
+// ```
+pub fn identifier_byte(class: Int, constructed: Bool, tag: Int) -> Int []
+    todo("asn1tag.identifier_byte")
+
+// The class an identifier octet names.
+pub fn class_of(id: Int) -> Int []
+    todo("asn1tag.class_of")
+
+// Whether an identifier octet has the constructed bit set.
+pub fn is_constructed(id: Int) -> Bool []
+    todo("asn1tag.is_constructed")
+
+// The tag number in an identifier octet's low five bits.
+//
+// Only meaningful when `is_high_tag` is false; a high-tag identifier
+// carries its number in the bytes that follow.
+pub fn tag_of_low(id: Int) -> Int []
+    todo("asn1tag.tag_of_low")
+
+// Whether an identifier octet's low five bits are all set, which means
+// the tag number is 31 or above and travels in the bytes after it,
+// base 128, high bit set on every byte but the last.
+//
+// Vanishingly rare in PKIX and required for correctness anyway: a
+// parser that assumed the low five bits were the whole number would
+// read a `[31]` context tag as a `[31]` that is not there.
+pub fn is_high_tag(id: Int) -> Bool []
+    todo("asn1tag.is_high_tag")
+
+// The most bytes an identifier occupies for this tag number: 1 below
+// 31, then one more per seven bits.
+pub fn identifier_len(tag: Int) -> Int []
+    todo("asn1tag.identifier_len")
+
+// ── the universal tag numbers this package names ────────────────────
+
+// BOOLEAN: 1.  DER requires `0xff` for true and refuses any other
+// non-zero byte, which BER allows — `asn1read`'s tolerance flag is
+// where that difference lives.
+pub fn tag_boolean() -> Int []
+    todo("asn1tag.tag_boolean")
+
+// INTEGER: 2.  Two's complement, big-endian, shortest form, and a
+// leading zero byte when the first content bit would otherwise make a
+// positive number look negative.  That leading zero is why a 256-bit
+// RSA modulus is 257 bytes of content.
+pub fn tag_integer() -> Int []
+    todo("asn1tag.tag_integer")
+
+// BIT STRING: 3.  The first content byte is the number of UNUSED bits
+// in the last byte, `0 ..= 7`, and the bits themselves follow.
+pub fn tag_bit_string() -> Int []
+    todo("asn1tag.tag_bit_string")
+
+// OCTET STRING: 4.
+pub fn tag_octet_string() -> Int []
+    todo("asn1tag.tag_octet_string")
+
+// NULL: 5.  Always two bytes, `05 00`, and the `parameters` of every
+// algorithm identifier that has none.
+pub fn tag_null() -> Int []
+    todo("asn1tag.tag_null")
+
+// OBJECT IDENTIFIER: 6.
+pub fn tag_oid() -> Int []
+    todo("asn1tag.tag_oid")
+
+// ENUMERATED: 10.  An INTEGER with a fixed set of meanings, and
+// encoded identically.
+pub fn tag_enumerated() -> Int []
+    todo("asn1tag.tag_enumerated")
+
+// UTF8String: 12.  What a modern certificate's subject uses.
+pub fn tag_utf8_string() -> Int []
+    todo("asn1tag.tag_utf8_string")
+
+// SEQUENCE: 16, always constructed.  `0x30` as an identifier octet.
+pub fn tag_sequence() -> Int []
+    todo("asn1tag.tag_sequence")
+
+// SET: 17, always constructed.  `0x31`.
+pub fn tag_set() -> Int []
+    todo("asn1tag.tag_set")
+
+// PrintableString: 19.  A restricted alphabet — letters, digits, space
+// and eleven punctuation characters — and NOT the one most people
+// guess: it has no `@`, no `_` and no `*`.
+pub fn tag_printable_string() -> Int []
+    todo("asn1tag.tag_printable_string")
+
+// IA5String: 22.  ASCII, `0x00 ..= 0x7f`.  What an email address and a
+// DNS name in a subject alternative name are written in.
+pub fn tag_ia5_string() -> Int []
+    todo("asn1tag.tag_ia5_string")
+
+// UTCTime: 23.  Two-digit year, and the reason `not_after` needs a
+// rule: 50 and above is 19xx, below 50 is 20xx.
+pub fn tag_utc_time() -> Int []
+    todo("asn1tag.tag_utc_time")
+
+// GeneralizedTime: 24.  Four-digit year, and what a certificate valid
+// past 2049 must use.
+pub fn tag_generalized_time() -> Int []
+    todo("asn1tag.tag_generalized_time")
+
+// ── lengths ─────────────────────────────────────────────────────────
+
+// How many bytes the definite length form for `len` occupies: 1 below
+// 128, then one more per 256.
+//
+// ```novo
+// use asn1tag
+//
+// fn main() [io]
+//     let a = asn1tag.length_len(127)
+//     let b = asn1tag.length_len(128)
+//     println("${a} ${b}")   // 1 2
+// ```
+pub fn length_len(len: Int) -> Int []
+    todo("asn1tag.length_len")
+
+// The whole header's length for this tag number and content length:
+// the identifier plus the length octets.
+pub fn header_len(tag: Int, len: Int) -> Int []
+    todo("asn1tag.header_len")
+
+// The byte that opens the indefinite length form: `0x80`.
+//
+// BER only.  DER forbids it, and a DER parser that accepted one would
+// accept two encodings of the same value — which is the property
+// signatures depend on.
+pub fn indefinite_byte() -> Int []
+    todo("asn1tag.indefinite_byte")
+
+// How many bytes an end-of-contents marker occupies: 2, `00 00`.
+//
+// What closes an indefinite-length constructed value.
+pub fn end_of_contents_len() -> Int []
+    todo("asn1tag.end_of_contents_len")
+
+// ── the header, scanned one byte at a time ──────────────────────────
+
+// A header being read, one byte at a time.
+//
+// A `@value` struct, so it lives in the caller's stack frame with no
+// header, no reference count and no allocation.  A device walking a
+// certificate owns eighty bytes of its own frame and nothing else.
+//
+// `seen` counts the bytes consumed, `want` is the total once it is
+// known and 0 before that.  `done` is set when the header is complete,
+// `indefinite` when the length byte was `0x80`, and `bad` when the
+// bytes cannot be a header at all — a length whose byte count is 127,
+// which BER reserves, or a high tag that never terminates.
+pub @value
+struct AsnHeadScan
+    id: Int
+    class: Int
+    constructed: Bool
+    tag: Int
+    len: Int
+    seen: Int
+    want: Int
+    indefinite: Bool
+    done: Bool
+    bad: Bool
+
+// A fresh scan, waiting for an identifier octet.
+//
+// ```novo
+// use asn1tag
+//
+// fn main() [io]
+//     println("${asn1tag.head_scan().seen}")   // 0
+// ```
+pub fn head_scan() -> AsnHeadScan []
+    todo("asn1tag.head_scan")
+
+// Feed one byte and answer the scan after it.
+//
+// A byte fed to a scan that is already `done` is ignored, because a
+// `@value` function has nowhere to put a refusal and a caller that
+// checks `done` cannot reach the case.
+//
+// ```novo
+// use asn1tag
+//
+// fn main() [io]
+//     // `30 03` — a SEQUENCE of three bytes, which is where every DER
+//     // document starts.
+//     let s1 = asn1tag.head_push(asn1tag.head_scan(), 0x30 as u8)
+//     let s2 = asn1tag.head_push(s1, 0x03 as u8)
+//     println("${s2.done} ${s2.tag} ${s2.len}")   // true 16 3
+// ```
+pub fn head_push(s: AsnHeadScan, b: u8) -> AsnHeadScan []
+    todo("asn1tag.head_push")
+
+// How many more bytes the scan needs: `want - seen`, and 1 before the
+// identifier octet has arrived.
+//
+// What a device reading from a UART asks so that it can wait for
+// exactly that many.
+pub fn head_need(s: AsnHeadScan) -> Int []
+    todo("asn1tag.head_need")
+
+// ── writing a header without a buffer ───────────────────────────────
+
+// What one header write produced: the bytes, and whether it was
+// writable.
+//
+// `out` is a fixed sixteen-byte inline array because sixteen covers
+// both parts of the longest header this package will write — a high
+// tag number and an eight-byte length — and a list would be a heap
+// allocation in an interrupt handler.
+pub @value
+struct AsnEmit
+    out: [u8; 16]
+    len: Int
+    ok: Bool
+
+// The identifier octets for a class, a constructed flag and a tag
+// number.
+//
+// One byte below 31; above it, `0x1f` and then the number base 128.
+// `ok` is false for a class outside `0 ..= 3` or a negative tag.
+pub fn emit_identifier(class: Int, constructed: Bool, tag: Int) -> AsnEmit []
+    todo("asn1tag.emit_identifier")
+
+// The DEFINITE length octets for `len`: the short form below 128, and
+// the long form above it.
+//
+// Always the shortest encoding, which is DER's rule and the reason two
+// encoders agree byte for byte.  `ok` is false for a negative length.
+//
+// ```novo
+// use asn1tag
+//
+// fn main() [io]
+//     let e = asn1tag.emit_length(200)
+//     println("${e.len}")   // 2 — 0x81 0xc8
+// ```
+pub fn emit_length(len: Int) -> AsnEmit []
+    todo("asn1tag.emit_length")
+
+// ── an OBJECT IDENTIFIER's arcs, without a buffer ───────────────────
+
+// One arc being read, one byte at a time.
+//
+// An OID's content is its arcs base 128, high bit set on every byte but
+// the last — the same shape as a length's long form and a different
+// rule.  The FIRST two arcs share one value: `40 * first + second`,
+// which is why `1.2` and `1.3` differ by one byte and `2.100` needs
+// two.
+//
+// A `@value` struct, so a device comparing a certificate's algorithm
+// against one it was provisioned with does it in registers.
+pub @value
+struct AsnArcScan
+    acc: Int
+    seen: Int
+    done: Bool
+    bad: Bool
+
+// A fresh arc scan.
+pub fn arc_scan() -> AsnArcScan []
+    todo("asn1tag.arc_scan")
+
+// Feed one byte of an arc and answer the scan after it.
+//
+// `done` when the byte's high bit was clear, `bad` when the arc has run
+// past what an `Int` can hold or began with a `0x80` padding byte,
+// which DER forbids because it would make two encodings of one arc.
+//
+// ```novo
+// use asn1tag
+//
+// fn main() [io]
+//     // 0x2a is the first content byte of every OID under 1.2:
+//     // 40 * 1 + 2.
+//     let a = asn1tag.arc_push(asn1tag.arc_scan(), 0x2a as u8)
+//     println("${a.done} ${a.acc}")   // true 42
+// ```
+pub fn arc_push(s: AsnArcScan, b: u8) -> AsnArcScan []
+    todo("asn1tag.arc_push")
+
+// The first arc that a packed first byte stands for: `packed / 40`,
+// capped at 2.
+//
+// The cap is the rule people get wrong: arc 2 has no limit on its
+// second component, so `2.100` packs to 180 and `180 / 40` is 4.  The
+// first arc is `min(packed / 40, 2)` and the second is what is left.
+pub fn first_arc(packed: Int) -> Int []
+    todo("asn1tag.first_arc")
+
+// The second arc that a packed first value stands for: `packed` less
+// `40 *` the first arc.
+pub fn second_arc(packed: Int) -> Int []
+    todo("asn1tag.second_arc")
+
+// The packed value for a first and second arc: `40 * first + second`.
+pub fn pack_arcs(first: Int, second: Int) -> Int []
+    todo("asn1tag.pack_arcs")
+
+// How many bytes one arc occupies base 128: 1 below 128, then one more
+// per seven bits.
+pub fn arc_len(arc: Int) -> Int []
+    todo("asn1tag.arc_len")
+
+// One arc's bytes, base 128, high bit set on every byte but the last.
+//
+// `ok` is false for a negative arc.
+pub fn emit_arc(arc: Int) -> AsnEmit []
+    todo("asn1tag.emit_arc")

@@ -1,0 +1,1264 @@
+// tests/asn1_tests.nv — X.690's own worked encodings, and the PKIX
+// samples the RFCs print in full.
+//
+// They COMPILE today and they FAIL at run, with `not implemented:
+// <module>.<fn>` from the `todo()` that is each body.  That is the
+// expected state of an interface release: the compiler has checked
+// every signature, every type and every effect row, and nothing else
+// has been checked because there is nothing else yet.
+//
+// WHERE THE VECTORS COME FROM.  ITU-T X.690 § 8 for the encodings —
+// the two length forms, the boolean rule, the shortest-form integer,
+// and the `2.100.3` object identifier that exists precisely to catch a
+// parser that divides the first byte by 40 without a cap.  RFC 8410
+// § 10.1 and § 10.3 for the Ed25519 key samples, decoded from the
+// base64 the RFC prints.  RFC 5280 for the certificate's shape and for
+// the two-digit-year rule.  A test that passes here is bytes that
+// OpenSSL and every other implementation read the same way.
+
+use std.test
+use std.bytes
+use asn1tag
+use asn1read
+use asn1univ
+use asn1oid
+use asn1write
+use asn1pkix
+use asn1err
+use civil
+
+// ── the identifier octet ────────────────────────────────────────────
+
+@test
+fn test_the_sequence_identifier_is_the_byte_every_der_document_starts_with()
+    // Universal class, constructed, tag 16 — `0x30`.
+    let seq = asn1tag.identifier_byte(asn1tag.class_universal(), true, asn1tag.tag_sequence())
+    test.assert_eq(seq, 48)
+    test.assert_eq(asn1tag.class_of(48), asn1tag.class_universal())
+    test.assert_eq(asn1tag.is_constructed(48), true)
+    test.assert_eq(asn1tag.tag_of_low(48), 16)
+    test.assert_eq(asn1tag.is_high_tag(48), false)
+
+@test
+fn test_a_context_tag_is_where_every_optional_pkix_field_lives()
+    // `[0]` constructed is `0xa0`, which is a certificate's version.
+    let ctx0 = asn1tag.identifier_byte(asn1tag.class_context(), true, 0)
+    test.assert_eq(ctx0, 160)
+    test.assert_eq(asn1tag.class_of(160), asn1tag.class_context())
+    test.assert_eq(asn1tag.class_application(), 1)
+    test.assert_eq(asn1tag.class_private(), 3)
+    test.assert_eq(asn1tag.constructed_bit(), 32)
+
+@test
+fn test_a_low_tag_of_thirty_one_means_the_number_is_somewhere_else()
+    // Vanishingly rare in PKIX and required for correctness anyway: a
+    // parser that read the low five bits as the whole number would read
+    // a `[31]` that is not there.
+    test.assert_eq(asn1tag.is_high_tag(0x1f), true)
+    test.assert_eq(asn1tag.identifier_len(30), 1)
+    test.assert_eq(asn1tag.identifier_len(31), 2)
+    test.assert_eq(asn1tag.identifier_len(128), 3)
+
+@test
+fn test_the_universal_tag_numbers_are_the_standards_own()
+    test.assert_eq(asn1tag.tag_boolean(), 1)
+    test.assert_eq(asn1tag.tag_integer(), 2)
+    test.assert_eq(asn1tag.tag_bit_string(), 3)
+    test.assert_eq(asn1tag.tag_octet_string(), 4)
+    test.assert_eq(asn1tag.tag_null(), 5)
+    test.assert_eq(asn1tag.tag_oid(), 6)
+    test.assert_eq(asn1tag.tag_enumerated(), 10)
+    test.assert_eq(asn1tag.tag_utf8_string(), 12)
+    test.assert_eq(asn1tag.tag_sequence(), 16)
+    test.assert_eq(asn1tag.tag_set(), 17)
+    test.assert_eq(asn1tag.tag_printable_string(), 19)
+    test.assert_eq(asn1tag.tag_ia5_string(), 22)
+    test.assert_eq(asn1tag.tag_utc_time(), 23)
+    test.assert_eq(asn1tag.tag_generalized_time(), 24)
+
+// ── the two length forms ────────────────────────────────────────────
+
+@test
+fn test_a_length_below_one_hundred_and_twenty_eight_is_one_byte_and_is_that_number()
+    test.assert_eq(asn1tag.length_len(0), 1)
+    test.assert_eq(asn1tag.length_len(127), 1)
+    test.assert_eq(asn1tag.length_len(128), 2)
+    test.assert_eq(asn1tag.length_len(255), 2)
+    test.assert_eq(asn1tag.length_len(256), 3)
+    test.assert_eq(asn1tag.length_len(65535), 3)
+    test.assert_eq(asn1tag.length_len(65536), 4)
+
+@test
+fn test_the_long_form_is_a_count_byte_and_then_the_number_big_endian()
+    // 200 is `81 c8`; 500 is `82 01 f4`.
+    let a = asn1tag.emit_length(200)
+    test.assert_eq(a.ok, true)
+    test.assert_eq(a.len, 2)
+    test.assert_eq(a.out[0] as Int, 0x81)
+    test.assert_eq(a.out[1] as Int, 0xc8)
+    let b = asn1tag.emit_length(500)
+    test.assert_eq(b.len, 3)
+    test.assert_eq(b.out[0] as Int, 0x82)
+
+@test
+fn test_the_indefinite_byte_and_the_end_of_contents_are_named()
+    test.assert_eq(asn1tag.indefinite_byte(), 128)
+    test.assert_eq(asn1tag.end_of_contents_len(), 2)
+    test.assert_eq(asn1tag.header_len(asn1tag.tag_sequence(), 3), 2)
+    test.assert_eq(asn1tag.header_len(asn1tag.tag_sequence(), 500), 4)
+
+@test
+fn test_a_header_scans_one_byte_at_a_time()
+    // `30 03` — a SEQUENCE of three bytes, which is where every DER
+    // document starts.
+    let s1 = asn1tag.head_push(asn1tag.head_scan(), 0x30 as u8)
+    test.assert_eq(s1.done, false)
+    test.assert_eq(asn1tag.head_need(s1), 1)
+    let s2 = asn1tag.head_push(s1, 0x03 as u8)
+    test.assert_eq(s2.done, true)
+    test.assert_eq(s2.tag, 16)
+    test.assert_eq(s2.len, 3)
+    test.assert_eq(s2.constructed, true)
+    test.assert_eq(s2.indefinite, false)
+    test.assert_eq(s2.bad, false)
+    test.assert_eq(asn1tag.head_scan().seen, 0)
+
+@test
+fn test_a_long_form_header_scans_across_its_length_bytes()
+    // `30 82 01 f4` — a SEQUENCE of 500 bytes.
+    var h = asn1tag.head_scan()
+    h = asn1tag.head_push(h, 0x30 as u8)
+    h = asn1tag.head_push(h, 0x82 as u8)
+    test.assert_eq(h.done, false)
+    test.assert_eq(h.want, 4)
+    h = asn1tag.head_push(h, 0x01 as u8)
+    h = asn1tag.head_push(h, 0xf4 as u8)
+    test.assert_eq(h.done, true)
+    test.assert_eq(h.len, 500)
+
+@test
+fn test_the_indefinite_form_is_a_fact_the_scan_carries_and_the_reader_refuses()
+    // `30 80` — BER only.  The scan says what it saw; DER's rule lives
+    // in the reader, which is the split that lets a tolerant reader
+    // exist at all.
+    var h = asn1tag.head_scan()
+    h = asn1tag.head_push(h, 0x30 as u8)
+    h = asn1tag.head_push(h, 0x80 as u8)
+    test.assert_eq(h.indefinite, true)
+    test.assert_eq(h.bad, false)
+
+@test
+fn test_a_length_count_of_one_hundred_and_twenty_seven_is_reserved()
+    var h = asn1tag.head_scan()
+    h = asn1tag.head_push(h, 0x30 as u8)
+    h = asn1tag.head_push(h, 0xff as u8)
+    test.assert_eq(h.bad, true)
+
+@test
+fn test_writing_an_identifier_answers_its_bytes()
+    let e = asn1tag.emit_identifier(asn1tag.class_universal(), false, asn1tag.tag_integer())
+    test.assert_eq(e.ok, true)
+    test.assert_eq(e.len, 1)
+    test.assert_eq(e.out[0] as Int, 2)
+
+// ── the object identifier arcs ──────────────────────────────────────
+
+@test
+fn test_the_first_two_arcs_share_one_value()
+    // 0x2a is `40 * 1 + 2`, which is the first content byte of every
+    // OID under 1.2 — and the byte a reader of a hexdump learns first.
+    test.assert_eq(asn1tag.pack_arcs(1, 2), 42)
+    test.assert_eq(asn1tag.first_arc(42), 1)
+    test.assert_eq(asn1tag.second_arc(42), 2)
+
+@test
+fn test_the_division_by_forty_is_capped_at_two_and_x690_prints_the_vector()
+    // `2.100.3`: 40 * 2 + 100 is 180, and 180 / 40 is 4 — which is not
+    // an arc anything has.  A parser without the cap misreads every OID
+    // under the joint arc, which is every X.500 attribute type in a
+    // certificate's subject.
+    test.assert_eq(asn1tag.pack_arcs(2, 100), 180)
+    test.assert_eq(asn1tag.first_arc(180), 2)
+    test.assert_eq(asn1tag.second_arc(180), 100)
+    // And 2.5, the one that actually appears: 40 * 2 + 5 is 85, 0x55.
+    test.assert_eq(asn1tag.pack_arcs(2, 5), 85)
+    test.assert_eq(asn1tag.first_arc(85), 2)
+    test.assert_eq(asn1tag.second_arc(85), 5)
+
+@test
+fn test_an_arc_is_base_one_hundred_and_twenty_eight()
+    test.assert_eq(asn1tag.arc_len(127), 1)
+    test.assert_eq(asn1tag.arc_len(128), 2)
+    test.assert_eq(asn1tag.arc_len(840), 2)
+    let e = asn1tag.emit_arc(840)
+    test.assert_eq(e.ok, true)
+    test.assert_eq(e.len, 2)
+    test.assert_eq(e.out[0] as Int, 0x86)
+    test.assert_eq(e.out[1] as Int, 0x48)
+
+@test
+fn test_an_arc_scans_one_byte_at_a_time()
+    let a = asn1tag.arc_push(asn1tag.arc_scan(), 0x2a as u8)
+    test.assert_eq(a.done, true)
+    test.assert_eq(a.acc, 42)
+    test.assert_eq(a.bad, false)
+    let b = asn1tag.arc_push(asn1tag.arc_scan(), 0x86 as u8)
+    test.assert_eq(b.done, false)
+    test.assert_eq(asn1tag.arc_push(b, 0x48 as u8).acc, 840)
+
+@test
+fn test_an_arc_with_a_leading_padding_byte_is_refused()
+    // DER forbids it because it would make two encodings of one arc.
+    test.assert_eq(asn1tag.arc_push(asn1tag.arc_scan(), 0x80 as u8).bad, true)
+
+// ── OIDs as values ──────────────────────────────────────────────────
+
+@test
+fn test_an_oid_round_trips_through_its_dotted_text()
+    let ec = asn1oid.oid([1, 2, 840, 10045, 2, 1])
+    test.assert_eq(asn1oid.oid_text(ec), "1.2.840.10045.2.1")
+    test.assert_eq(asn1oid.arc_count(ec), 6)
+    test.assert_eq(asn1oid.arc_at(ec, 2), 840)
+    test.assert_eq(asn1oid.arc_at(ec, 99), 0 - 1)
+    match asn1oid.oid_of_text("1.2.840.10045.2.1")
+        Some(o) => test.assert_eq(asn1oid.equals(o, ec), true)
+        None    => test.fail("that is a dotted OID")
+
+@test
+fn test_a_text_that_is_not_dotted_arcs_is_not_an_oid()
+    match asn1oid.oid_of_text("1.2.x")
+        Some(_) => test.fail("x is not an arc")
+        None    => test.assert_eq(1, 1)
+    match asn1oid.oid_of_text("")
+        Some(_) => test.fail("the empty string is not an OID")
+        None    => test.assert_eq(1, 1)
+
+@test
+fn test_an_oid_decodes_from_the_bytes_a_certificate_carries()
+    // `2a 86 48 ce 3d 02 01` — id-ecPublicKey's content.
+    let content = bytes.from_hex("2a8648ce3d0201") ?? bytes.zeros(0)
+    match asn1oid.decode(content)
+        Ok(o)  => test.assert_eq(asn1oid.oid_text(o), "1.2.840.10045.2.1")
+        Err(e) => test.fail(e.message())
+    // `55 04 03` — the common name attribute, which is where the cap
+    // on the first arc matters.
+    let cn = bytes.from_hex("550403") ?? bytes.zeros(0)
+    match asn1oid.decode(cn)
+        Ok(o)  => test.assert_eq(asn1oid.oid_text(o), "2.5.4.3")
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_an_oid_with_a_trailing_continuation_bit_is_refused()
+    let bad = bytes.from_hex("2a86") ?? bytes.zeros(0)
+    match asn1oid.decode(bad)
+        Ok(_)  => test.fail("the last arc byte must have its high bit clear")
+        Err(e) =>
+            match e
+                AsnBadOid(_) => test.assert_eq(1, 1)
+                _            => test.fail("expected AsnBadOid: ${e.message()}")
+
+@test
+fn test_the_named_oids_are_the_ones_the_crypto_tier_asks_for()
+    test.assert_eq(asn1oid.oid_text(asn1oid.oid_ec_public_key()), "1.2.840.10045.2.1")
+    test.assert_eq(asn1oid.oid_text(asn1oid.oid_prime256v1()), "1.2.840.10045.3.1.7")
+    test.assert_eq(asn1oid.oid_text(asn1oid.oid_ed25519()), "1.3.101.112")
+    test.assert_eq(asn1oid.oid_text(asn1oid.oid_x25519()), "1.3.101.110")
+    test.assert_eq(asn1oid.oid_text(asn1oid.oid_secp384r1()), "1.3.132.0.34")
+    test.assert_eq(asn1oid.oid_text(asn1oid.oid_rsa_encryption()), "1.2.840.113549.1.1.1")
+    test.assert_eq(asn1oid.oid_text(asn1oid.oid_sha256()), "2.16.840.1.101.3.4.2.1")
+    test.assert_eq(asn1oid.oid_text(asn1oid.oid_ecdsa_with_sha256()), "1.2.840.10045.4.3.2")
+    test.assert_eq(asn1oid.oid_text(asn1oid.oid_sha256_with_rsa()), "1.2.840.113549.1.1.11")
+
+@test
+fn test_the_x500_and_extension_oids_are_named_too()
+    test.assert_eq(asn1oid.oid_text(asn1oid.oid_common_name()), "2.5.4.3")
+    test.assert_eq(asn1oid.oid_text(asn1oid.oid_country_name()), "2.5.4.6")
+    test.assert_eq(asn1oid.oid_text(asn1oid.oid_organization_name()), "2.5.4.10")
+    test.assert_eq(asn1oid.oid_text(asn1oid.oid_organizational_unit_name()), "2.5.4.11")
+    test.assert_eq(asn1oid.oid_text(asn1oid.oid_key_usage()), "2.5.29.15")
+    test.assert_eq(asn1oid.oid_text(asn1oid.oid_subject_alt_name()), "2.5.29.17")
+    test.assert_eq(asn1oid.oid_text(asn1oid.oid_basic_constraints()), "2.5.29.19")
+    test.assert_eq(asn1oid.oid_text(asn1oid.oid_ext_key_usage()), "2.5.29.37")
+    test.assert_eq(asn1oid.oid_name(asn1oid.oid_common_name()), "CN")
+    test.assert_eq(asn1oid.oid_name(asn1oid.oid([9, 9, 9])), "")
+
+@test
+fn test_an_oid_knows_whether_it_is_under_another()
+    let ec = asn1oid.oid_ec_public_key()
+    test.assert_eq(asn1oid.starts_with(ec, asn1oid.oid([1, 2, 840])), true)
+    test.assert_eq(asn1oid.starts_with(ec, asn1oid.oid([1, 3])), false)
+    test.assert_eq(asn1oid.arcs_of(ec).len(), 6)
+
+@test
+fn test_an_oid_encodes_into_the_callers_buffer()
+    let ec = asn1oid.oid_ec_public_key()
+    match asn1oid.encoded_len(ec)
+        Ok(n)  => test.assert_eq(n, 7)
+        Err(e) => test.fail(e.message())
+    var c = bytes.cursor_be(bytes.zeros(16))
+    match asn1oid.encode_into(ec, c)
+        Ok(n)  => test.assert_eq(n, 7)
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_an_oid_with_one_arc_cannot_be_encoded()
+    match asn1oid.encoded_len(asn1oid.oid([1]))
+        Ok(_)  => test.fail("the first two arcs share one byte, so there must be two")
+        Err(e) =>
+            match e
+                AsnBadOidArcs(_) => test.assert_eq(1, 1)
+                _                => test.fail("expected AsnBadOidArcs: ${e.message()}")
+
+// ── reading a document by offset ────────────────────────────────────
+
+@test
+fn test_a_header_is_read_at_an_offset()
+    // `30 03 02 01 07` — a SEQUENCE holding the INTEGER 7.
+    let der = bytes.from_hex("3003020107") ?? bytes.zeros(0)
+    match asn1read.header_at(der, 0, asn1read.default_limits())
+        Ok(h)  =>
+            test.assert_eq(h.tag.number, 16)
+            test.assert_eq(h.tag.constructed, true)
+            test.assert_eq(h.length, 3)
+            test.assert_eq(h.header_len, 2)
+            test.assert_eq(h.indefinite, false)
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_the_spans_point_into_the_callers_own_bytes()
+    let der = bytes.from_hex("3003020107") ?? bytes.zeros(0)
+    match asn1read.content_span_at(der, 0, asn1read.default_limits())
+        Ok(s)  =>
+            test.assert_eq(s.off, 2)
+            test.assert_eq(s.len, 3)
+        Err(e) => test.fail(e.message())
+    match asn1read.value_span_at(der, 0, asn1read.default_limits())
+        Ok(s)  =>
+            test.assert_eq(s.off, 0)
+            test.assert_eq(s.len, 5)
+        Err(e) => test.fail(e.message())
+    match asn1read.next_offset(der, 2, asn1read.default_limits())
+        Ok(n)  => test.assert_eq(n, 5)
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_a_sequences_children_come_back_in_document_order()
+    // `30 06 02 01 07 02 01 08` — a SEQUENCE of two INTEGERs.
+    let der = bytes.from_hex("3006020107020108") ?? bytes.zeros(0)
+    match asn1read.children_at(der, 0, asn1read.default_limits())
+        Ok(kids) =>
+            test.assert_eq(kids.len(), 2)
+            test.assert_eq(kids[0].off, 2)
+            test.assert_eq(kids[1].off, 5)
+        Err(e)   => test.fail(e.message())
+
+@test
+fn test_asking_for_a_primitive_values_children_is_its_own_refusal()
+    let der = bytes.from_hex("020107") ?? bytes.zeros(0)
+    match asn1read.children_at(der, 0, asn1read.default_limits())
+        Ok(_)  => test.fail("an INTEGER has no children")
+        Err(e) =>
+            match e
+                AsnWrongConstruction(_, c) => test.assert_eq(c, false)
+                _                          => test.fail("expected AsnWrongConstruction: ${e.message()}")
+
+@test
+fn test_expecting_a_tag_names_both_numbers_when_it_is_wrong()
+    // So a person reading the refusal can find the field in the
+    // standard's own ASN.1 module.
+    let der = bytes.from_hex("3003020107") ?? bytes.zeros(0)
+    match asn1read.expect_at(der, 0, asn1tag.tag_integer(), asn1read.default_limits())
+        Ok(_)  => test.fail("that is a SEQUENCE")
+        Err(e) =>
+            match e
+                AsnUnexpectedTag(_, want, got) =>
+                    test.assert_eq(want, 2)
+                    test.assert_eq(got, 16)
+                _                              => test.fail("expected AsnUnexpectedTag: ${e.message()}")
+
+@test
+fn test_a_length_past_the_end_is_refused_before_anything_is_reserved()
+    // `30 82 01 f4` announcing 500 bytes that are not there.
+    let der = bytes.from_hex("308201f4") ?? bytes.zeros(0)
+    match asn1read.value_span_at(der, 0, asn1read.default_limits())
+        Ok(_)  => test.fail("that length is past the end of the buffer")
+        Err(e) =>
+            match e
+                AsnLengthOverrun(_, len, _) => test.assert_eq(len, 500)
+                _                           => test.fail("expected AsnLengthOverrun: ${e.message()}")
+
+@test
+fn test_der_refuses_the_indefinite_length_and_ber_accepts_it()
+    // The same bytes, two answers, and the flag is the only difference.
+    let der = bytes.from_hex("30800201070000") ?? bytes.zeros(0)
+    match asn1read.header_at(der, 0, asn1read.default_limits())
+        Ok(_)  => test.fail("DER has no indefinite length")
+        Err(e) =>
+            match e
+                AsnIndefiniteLength(at) =>
+                    test.assert_eq(at, 1)
+                    test.assert_eq(asn1err.is_der_only(e), true)
+                _                       => test.fail("expected AsnIndefiniteLength: ${e.message()}")
+    test.assert_eq(asn1read.ber_limits().ber_tolerant, true)
+    test.assert_eq(asn1read.default_limits().ber_tolerant, false)
+
+@test
+fn test_a_non_minimal_length_is_a_second_encoding_of_one_value()
+    // `30 81 03` says three bytes in the long form, which the short
+    // form could have held.  Two encodings of one value is how a
+    // signature checks out over something the reader did not read.
+    let der = bytes.from_hex("308103020107") ?? bytes.zeros(0)
+    match asn1read.header_at(der, 0, asn1read.default_limits())
+        Ok(_)  => test.fail("DER requires the shortest length")
+        Err(e) =>
+            match e
+                AsnNonMinimalLength(_) => test.assert_eq(asn1err.is_der_only(e), true)
+                _                      => test.fail("expected AsnNonMinimalLength: ${e.message()}")
+
+@test
+fn test_a_truncated_document_says_where_it_stopped()
+    let der = bytes.from_hex("30") ?? bytes.zeros(0)
+    match asn1read.header_at(der, 0, asn1read.default_limits())
+        Ok(_)  => test.fail("there is no length byte")
+        Err(e) =>
+            match e
+                AsnTruncated(at, _) =>
+                    test.assert_eq(at, 1)
+                    test.assert_eq(asn1err.decode_offset(e), 1)
+                    test.assert_eq(asn1err.is_der_only(e), false)
+                _                   => test.fail("expected AsnTruncated: ${e.message()}")
+
+@test
+fn test_a_document_is_exactly_one_value_and_trailing_bytes_are_a_fault()
+    let der = bytes.from_hex("020107020108") ?? bytes.zeros(0)
+    match asn1read.read_document(der, asn1read.default_limits())
+        Ok(_)  => test.fail("a DER document is one value")
+        Err(e) =>
+            match e
+                AsnTrailingBytes(_, left) => test.assert_eq(left, 3)
+                _                         => test.fail("expected AsnTrailingBytes: ${e.message()}")
+
+@test
+fn test_the_depth_bound_is_a_number_somebody_chose()
+    // ASN.1's nesting is unbounded by specification and a thirty-byte
+    // input can ask for a thousand levels of SEQUENCE.
+    test.assert_eq(asn1read.default_limits().max_depth, 64)
+    test.assert_eq(asn1read.ber_limits().max_depth, 64)
+
+// ── reading by feeding ──────────────────────────────────────────────
+
+@test
+fn test_the_reader_brackets_constructed_values()
+    let der = bytes.from_hex("3003020107") ?? bytes.zeros(0)
+    match asn1read.walk(der, asn1read.default_limits())
+        Ok(evs) =>
+            test.assert_eq(evs.len(), 3)
+            match evs[0]
+                AsnConstructedStart(t, at, length) =>
+                    test.assert_eq(t.number, 16)
+                    test.assert_eq(at, 0)
+                    test.assert_eq(length, 3)
+                _                                  => test.fail("expected a start")
+            match evs[1]
+                AsnPrimitiveValue(t, _, content) =>
+                    test.assert_eq(t.number, 2)
+                    test.assert_eq(bytes.to_hex(content), "07")
+                _                                => test.fail("expected a primitive")
+            match evs[2]
+                AsnConstructedEnd(t, _) => test.assert_eq(t.number, 16)
+                _                       => test.fail("expected an end")
+        Err(e)  => test.fail(e.message())
+
+@test
+fn test_a_value_split_across_chunks_waits_for_the_rest()
+    let head = bytes.from_hex("3003") ?? bytes.zeros(0)
+    let tail = bytes.from_hex("020107") ?? bytes.zeros(0)
+    match asn1read.feed(asn1read.reader(asn1read.default_limits()), bytes.to_byte_list(head))
+        Ok(s1) =>
+            test.assert_eq(s1.events.len(), 1)
+            test.assert_eq(asn1read.depth(s1.reader), 1)
+            test.assert_eq(asn1read.at_boundary(s1.reader), false)
+            match asn1read.feed(s1.reader, bytes.to_byte_list(tail))
+                Ok(s2) => test.assert_eq(s2.events.len(), 2)
+                Err(e) => test.fail(e.message())
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_the_reader_reports_where_it_is()
+    let r = asn1read.reader(asn1read.default_limits())
+    test.assert_eq(asn1read.offset(r), 0)
+    test.assert_eq(asn1read.pending_len(r), 0)
+    test.assert_eq(asn1read.depth(r), 0)
+    test.assert_eq(asn1read.at_boundary(r), true)
+    match asn1read.finish(r)
+        Ok(s)  => test.assert_eq(s.events.len(), 0)
+        Err(e) => test.fail(e.message())
+
+// ── the universal types ─────────────────────────────────────────────
+
+@test
+fn test_der_admits_one_encoding_of_true()
+    // `01 01 ff`, and `0xff` rather than 1 is the thing a hand-written
+    // encoder gets wrong first.
+    let t = bytes.from_hex("0101ff") ?? bytes.zeros(0)
+    let f = bytes.from_hex("010100") ?? bytes.zeros(0)
+    match asn1univ.boolean_at(t, 0, asn1read.default_limits())
+        Ok(v)  => test.assert_eq(v, true)
+        Err(e) => test.fail(e.message())
+    match asn1univ.boolean_at(f, 0, asn1read.default_limits())
+        Ok(v)  => test.assert_eq(v, false)
+        Err(e) => test.fail(e.message())
+    let one = bytes.from_hex("010101") ?? bytes.zeros(0)
+    match asn1univ.boolean_at(one, 0, asn1read.default_limits())
+        Ok(_)  => test.fail("DER admits 0xff alone")
+        Err(e) =>
+            match e
+                AsnBadBoolean(_, b) => test.assert_eq(b, 1)
+                _                   => test.fail("expected AsnBadBoolean: ${e.message()}")
+
+@test
+fn test_an_integer_reads_as_a_number_when_it_fits()
+    let der = bytes.from_hex("020107") ?? bytes.zeros(0)
+    match asn1univ.integer_at(der, 0, asn1read.default_limits())
+        Ok(n)  => test.assert_eq(n, 7)
+        Err(e) => test.fail(e.message())
+    // And as bytes whatever its length, leading zero included.
+    match asn1univ.integer_bytes_at(der, 0, asn1read.default_limits())
+        Ok(b)  => test.assert_eq(bytes.to_hex(b), "07")
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_a_twenty_byte_serial_number_is_bytes_and_not_a_number()
+    // Which is why there are two readers: a certificate's serial is
+    // twenty bytes and none of them fit an Int.
+    let der = bytes.from_hex("021400112233445566778899aabbccddeeff00112233") ?? bytes.zeros(0)
+    match asn1univ.integer_at(der, 0, asn1read.default_limits())
+        Ok(_)  => test.fail("twenty bytes do not fit an Int")
+        Err(e) =>
+            match e
+                AsnIntegerTooLarge(_, len) => test.assert_eq(len, 20)
+                _                          => test.fail("expected AsnIntegerTooLarge: ${e.message()}")
+    match asn1univ.integer_bytes_at(der, 0, asn1read.default_limits())
+        Ok(b)  => test.assert_eq(bytes.len(b), 20)
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_a_redundant_leading_byte_on_an_integer_is_refused()
+    // `02 02 00 07` — the shortest form is `02 01 07`.
+    let der = bytes.from_hex("02020007") ?? bytes.zeros(0)
+    match asn1univ.integer_at(der, 0, asn1read.default_limits())
+        Ok(_)  => test.fail("DER requires the shortest integer")
+        Err(e) =>
+            match e
+                AsnNonMinimalInteger(_) => test.assert_eq(asn1err.is_der_only(e), true)
+                _                       => test.fail("expected AsnNonMinimalInteger: ${e.message()}")
+
+@test
+fn test_null_is_two_bytes_and_nothing_else()
+    let der = bytes.from_hex("0500") ?? bytes.zeros(0)
+    match asn1univ.null_at(der, 0, asn1read.default_limits())
+        Ok(n)  => test.assert_eq(n, 2)
+        Err(e) => test.fail(e.message())
+    let bad = bytes.from_hex("050100") ?? bytes.zeros(0)
+    match asn1univ.null_at(bad, 0, asn1read.default_limits())
+        Ok(_)  => test.fail("05 00 is the only NULL there is")
+        Err(e) =>
+            match e
+                AsnNullWithContent(_, len) => test.assert_eq(len, 1)
+                _                          => test.fail("expected AsnNullWithContent: ${e.message()}")
+
+@test
+fn test_a_bit_string_carries_its_padding_count_in_front()
+    // `03 02 05 a0` — six bits, `101`, padded with five zeros.
+    let der = bytes.from_hex("030205a0") ?? bytes.zeros(0)
+    match asn1univ.bit_string_at(der, 0, asn1read.default_limits())
+        Ok(b)  =>
+            test.assert_eq(b.unused_bits, 5)
+            test.assert_eq(asn1univ.bit_count(b), 3)
+            test.assert_eq(asn1univ.bit_at(b, 0), true)
+            test.assert_eq(asn1univ.bit_at(b, 1), false)
+            test.assert_eq(asn1univ.bit_at(b, 2), true)
+            // Past the end is false rather than a refusal: a KeyUsage
+            // may be two bits long and a caller asking about bit 5
+            // wants "not set".
+            test.assert_eq(asn1univ.bit_at(b, 9), false)
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_an_unused_bit_count_above_seven_is_refused()
+    let der = bytes.from_hex("030209a0") ?? bytes.zeros(0)
+    match asn1univ.bit_string_at(der, 0, asn1read.default_limits())
+        Ok(_)  => test.fail("a byte has eight bits")
+        Err(e) =>
+            match e
+                AsnBadBitString(_, unused) => test.assert_eq(unused, 9)
+                _                          => test.fail("expected AsnBadBitString: ${e.message()}")
+
+@test
+fn test_an_octet_string_is_its_content()
+    let der = bytes.from_hex("0403010203") ?? bytes.zeros(0)
+    match asn1univ.octet_string_at(der, 0, asn1read.default_limits())
+        Ok(b)  => test.assert_eq(bytes.to_hex(b), "010203")
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_an_oid_reads_as_a_whole_value()
+    let der = bytes.from_hex("06072a8648ce3d0201") ?? bytes.zeros(0)
+    match asn1univ.oid_at(der, 0, asn1read.default_limits())
+        Ok(o)  => test.assert_eq(asn1oid.oid_text(o), "1.2.840.10045.2.1")
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_the_printable_string_alphabet_is_not_the_one_people_guess()
+    // No `@`, no `_`, no `*` — which is why every real certificate's
+    // subject is a UTF8String.
+    test.assert_eq(asn1univ.is_printable_string("Acme Ltd"), true)
+    test.assert_eq(asn1univ.is_printable_string("GB"), true)
+    test.assert_eq(asn1univ.is_printable_string("a'b(c)+d,e-f.g/h:i=j?"), true)
+    test.assert_eq(asn1univ.is_printable_string("acme@example.com"), false)
+    test.assert_eq(asn1univ.is_printable_string("a_b"), false)
+    test.assert_eq(asn1univ.is_printable_string("*.example.com"), false)
+    test.assert_eq(asn1univ.is_ia5_string("acme@example.com"), true)
+
+@test
+fn test_the_two_digit_year_rule_is_the_one_utctime_is_famous_for()
+    // 50 and above is 19xx, below 50 is 20xx — and that sliding window
+    // is why a certificate valid past 2049 must use GeneralizedTime.
+    test.assert_eq(asn1univ.utc_year(0), 2000)
+    test.assert_eq(asn1univ.utc_year(49), 2049)
+    test.assert_eq(asn1univ.utc_year(50), 1950)
+    test.assert_eq(asn1univ.utc_year(99), 1999)
+
+@test
+fn test_a_utctime_reads_as_a_civil_date()
+    // `17 0d 32 36 30 39 31 31 30 30 30 30 30 30 5a` —
+    // UTCTime "260911000000Z".
+    let der = bytes.from_hex("170d3236303931313030303030305a") ?? bytes.zeros(0)
+    match asn1univ.utc_time_at(der, 0, asn1read.default_limits())
+        Ok(t)  =>
+            test.assert_eq(t.date.year, 2026)
+            test.assert_eq(t.date.month, 9)
+            test.assert_eq(t.date.day, 11)
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_a_time_without_a_z_is_refused_even_in_tolerant_mode()
+    // A certificate that expires at a different moment in two places
+    // is not a thing this package will hand over.
+    let der = bytes.from_hex("170c323630393131303030303030") ?? bytes.zeros(0)
+    match asn1univ.utc_time_at(der, 0, asn1read.ber_limits())
+        Ok(_)  => test.fail("DER requires UTC")
+        Err(e) =>
+            match e
+                AsnTimeNotUtc(_) => test.assert_eq(asn1err.is_der_only(e), false)
+                _                => test.fail("expected AsnTimeNotUtc: ${e.message()}")
+
+@test
+fn test_a_generalized_time_carries_four_year_digits()
+    // `18 0f 32 30 32 36 30 39 31 31 30 30 30 30 30 30 5a` —
+    // GeneralizedTime "20260911000000Z".
+    let der = bytes.from_hex("180f32303236303931313030303030305a") ?? bytes.zeros(0)
+    match asn1univ.generalized_time_at(der, 0, asn1read.default_limits())
+        Ok(t)  => test.assert_eq(t.date.year, 2026)
+        Err(e) => test.fail(e.message())
+    match asn1univ.any_time_at(der, 0, asn1read.default_limits())
+        Ok(t)  => test.assert_eq(t.date.year, 2026)
+        Err(e) => test.fail(e.message())
+
+// ── writing ─────────────────────────────────────────────────────────
+
+@test
+fn test_a_leading_zero_is_what_keeps_a_positive_number_positive()
+    // 127 is `02 01 7f`; 128 is `02 02 00 80`, because `0x80` alone
+    // would be -128.
+    test.assert_eq(asn1write.integer_len(127), 3)
+    test.assert_eq(asn1write.integer_len(128), 4)
+    test.assert_eq(asn1write.integer_len(0), 3)
+    test.assert_eq(asn1write.integer_len(0 - 1), 3)
+    test.assert_eq(asn1write.tlv_len(asn1tag.tag_integer(), 1), 3)
+    test.assert_eq(asn1write.tlv_len(asn1tag.tag_sequence(), 500), 504)
+    test.assert_eq(asn1write.context_tlv_len(0, 3), 5)
+
+@test
+fn test_the_builder_writes_the_document_the_reader_reads()
+    let b = asn1write.builder(asn1write.build_limits())
+    match asn1write.begin_sequence(b)
+        Ok(b1) =>
+            match asn1write.put_integer(b1, 7)
+                Ok(b2) =>
+                    match asn1write.end(b2)
+                        Ok(b3) =>
+                            match asn1write.done(b3)
+                                Ok(out) => test.assert_eq(bytes.to_hex(out), "3003020107")
+                                Err(e)  => test.fail(e.message())
+                        Err(e) => test.fail(e.message())
+                Err(e) => test.fail(e.message())
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_a_builder_left_open_is_the_one_mistake_a_type_cannot_catch()
+    let b = asn1write.builder(asn1write.build_limits())
+    match asn1write.begin_sequence(b)
+        Ok(b1) =>
+            match asn1write.done(b1)
+                Ok(_)  => test.fail("the SEQUENCE is still open")
+                Err(e) =>
+                    match e
+                        AsnUnclosedValue(depth) => test.assert_eq(depth, 1)
+                        _                       => test.fail("expected AsnUnclosedValue: ${e.message()}")
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_writing_a_printable_string_refuses_rather_than_promoting_it()
+    // The TYPE is part of what a name matches on, and changing it
+    // changes the bytes a signature covers.
+    var c = bytes.cursor_be(bytes.zeros(64))
+    match asn1write.write_printable_string_into("acme@example.com", c)
+        Ok(_)  => test.fail("PrintableString has no @")
+        Err(e) =>
+            match e
+                AsnStringNotAllowed(tag, _) => test.assert_eq(tag, 19)
+                _                           => test.fail("expected AsnStringNotAllowed: ${e.message()}")
+
+@test
+fn test_every_primitive_writer_takes_the_callers_buffer()
+    var c = bytes.cursor_be(bytes.zeros(256))
+    test.assert_eq(ok_count(asn1write.write_boolean_into(true, c)), 3)
+    test.assert_eq(ok_count(asn1write.write_integer_into(7, c)), 3)
+    test.assert_eq(ok_count(asn1write.write_null_into(c)), 2)
+    test.assert_eq(ok_count(asn1write.write_octet_string_into(bytes.zeros(3), c)), 5)
+    test.assert_eq(ok_count(asn1write.write_bit_string_into(0, bytes.zeros(3), c)), 6)
+    test.assert_eq(ok_count(asn1write.write_oid_into(asn1oid.oid_ed25519(), c)), 5)
+    test.assert_eq(ok_count(asn1write.write_utf8_string_into("hi", c)), 4)
+    test.assert_eq(ok_count(asn1write.write_ia5_string_into("hi", c)), 4)
+    test.assert_eq(ok_count(asn1write.write_printable_string_into("HI", c)), 4)
+    test.assert_eq(ok_count(asn1write.write_tlv_into(asn1tag.tag_integer(), bytes.zeros(1), c)), 3)
+    test.assert_eq(ok_count(asn1write.write_header_into(asn1tag.tag_sequence(), true, 3, c)), 2)
+    test.assert_eq(ok_count(asn1write.write_context_header_into(0, true, 3, c)), 2)
+    test.assert_eq(ok_count(asn1write.write_integer_bytes_into(bytes.zeros(1), c)), 3)
+    test.assert_eq(ok_count(asn1write.write_explicit_into(0, bytes.zeros(3), c)), 5)
+    test.assert_eq(ok_count(asn1write.write_implicit_into(0, false, bytes.from_hex("020107") ?? bytes.zeros(0), c)),
+        3)
+
+fn ok_count(r: Result<Int, AsnEncodeError>) -> Int
+    match r
+        Ok(n)  => n
+        Err(e) =>
+            test.fail(e.message())
+            0 - 1
+
+@test
+fn test_a_buffer_too_small_says_how_much_more_it_wanted()
+    var c = bytes.cursor_be(bytes.zeros(1))
+    match asn1write.write_integer_into(7, c)
+        Ok(_)  => test.fail("three bytes do not fit in one")
+        Err(e) =>
+            match e
+                AsnBufferTooSmall(need, left) =>
+                    test.assert_eq(need, 3)
+                    test.assert_eq(left, 1)
+                _                             => test.fail("expected AsnBufferTooSmall: ${e.message()}")
+
+@test
+fn test_a_utctime_outside_its_window_is_not_writable()
+    // 1950 to 2049 is the whole range a two-digit year can name
+    // unambiguously, and RFC 5280 says to use GeneralizedTime outside
+    // it.
+    var c = bytes.cursor_be(bytes.zeros(32))
+    match civil.date(2050, 1, 1)
+        Ok(d)  =>
+            let t = civil.datetime(d, civil.midnight())
+            match asn1write.write_utc_time_into(t, c)
+                Ok(_)  => test.fail("2050 has no unambiguous two-digit year")
+                Err(e) =>
+                    match e
+                        AsnTimeNotWritable(year) => test.assert_eq(year, 2050)
+                        _                        => test.fail("expected AsnTimeNotWritable: ${e.message()}")
+            match asn1write.write_generalized_time_into(t, c)
+                Ok(n)  => test.assert_eq(n, 17)
+                Err(e) => test.fail(e.message())
+        Err(e) => test.fail(e.message())
+
+// ── the PKIX structures ─────────────────────────────────────────────
+
+// RFC 8410 § 10.1's Ed25519 public key, decoded from the base64 the RFC
+// prints: a SubjectPublicKeyInfo of forty-four bytes.
+fn rfc8410_public_key() -> Bytes
+    bytes.from_hex("302a300506032b657003210019bf44096984cdfe8541bac167dc3b96c85086aa30b6b6cb0c5c38ad703166e1") ?? bytes.zeros(0)
+
+// RFC 8410 § 10.3's Ed25519 private key: a PKCS#8 PrivateKeyInfo of
+// forty-eight bytes.
+fn rfc8410_private_key() -> Bytes
+    bytes.from_hex("302e020100300506032b657004220420d4ee72dbf913584ad5b6d8f1f769f8ad3afe7c28cbf1d4fbe097a88f44755842") ?? bytes.zeros(0)
+
+@test
+fn test_the_rfc_8410_public_key_parses_into_an_algorithm_and_a_key()
+    match asn1pkix.parse_spki(rfc8410_public_key(), asn1read.default_limits())
+        Ok(k)  =>
+            test.assert_eq(asn1oid.oid_text(k.algorithm.algorithm), "1.3.101.112")
+            test.assert_eq(k.public_key.unused_bits, 0)
+            test.assert_eq(bytes.len(k.public_key.data), 32)
+            // The parameters are ABSENT and not NULL, which is RFC
+            // 8410's rule and the one a hand-written encoder gets
+            // wrong.
+            match k.algorithm.parameters
+                Some(_) => test.fail("an Ed25519 key has no algorithm parameters")
+                None    => test.assert_eq(1, 1)
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_the_ed25519_public_key_is_the_thirty_two_bytes_ed25519_nv_takes()
+    match asn1pkix.parse_spki(rfc8410_public_key(), asn1read.default_limits())
+        Ok(k)  =>
+            match asn1pkix.ed25519_public_key(k)
+                Ok(raw) =>
+                    test.assert_eq(bytes.len(raw), 32)
+                    test.assert_eq(bytes.to_hex(raw),
+                        "19bf44096984cdfe8541bac167dc3b96c85086aa30b6b6cb0c5c38ad703166e1")
+                Err(e)  => test.fail(e.message())
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_the_rfc_8410_private_key_has_two_layers_of_octet_string()
+    // The seed is inside an OCTET STRING inside the privateKey OCTET
+    // STRING — a second layer RFC 8410 requires and everyone forgets.
+    // A parser that skipped it hands over thirty-four bytes that look
+    // nearly right.
+    match asn1pkix.parse_pkcs8(rfc8410_private_key(), asn1read.default_limits())
+        Ok(k)  =>
+            test.assert_eq(k.version, 0)
+            test.assert_eq(asn1oid.oid_text(k.algorithm.algorithm), "1.3.101.112")
+            test.assert_eq(bytes.len(k.private_key), 34)
+            match asn1pkix.ed25519_seed(k)
+                Ok(seed) =>
+                    test.assert_eq(bytes.len(seed), 32)
+                    test.assert_eq(bytes.to_hex(seed),
+                        "d4ee72dbf913584ad5b6d8f1f769f8ad3afe7c28cbf1d4fbe097a88f44755842")
+                Err(e)   => test.fail(e.message())
+            match k.attributes
+                Some(_) => test.fail("the sample carries no attributes")
+                None    => test.assert_eq(1, 1)
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_an_ed25519_key_is_not_an_ec_key_and_says_so()
+    match asn1pkix.parse_spki(rfc8410_public_key(), asn1read.default_limits())
+        Ok(k)  =>
+            match asn1pkix.ec_public_key_point(k)
+                Ok(_)  => test.fail("1.3.101.112 is not id-ecPublicKey")
+                Err(e) =>
+                    match e
+                        AsnUnexpectedTag(_, _, _) => test.assert_eq(1, 1)
+                        _                         => test.fail("expected AsnUnexpectedTag: ${e.message()}")
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_a_public_key_round_trips_through_its_own_encoding()
+    match asn1pkix.parse_spki(rfc8410_public_key(), asn1read.default_limits())
+        Ok(k)  =>
+            match asn1pkix.write_spki(k)
+                Ok(out) => test.assert_eq(bytes.to_hex(out), bytes.to_hex(rfc8410_public_key()))
+                Err(e)  => test.fail(e.message())
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_an_ed25519_spki_is_built_with_absent_parameters()
+    let key = bytes.from_hex("19bf44096984cdfe8541bac167dc3b96c85086aa30b6b6cb0c5c38ad703166e1") ?? bytes.zeros(0)
+    match asn1pkix.ed25519_spki(key)
+        Ok(k)  =>
+            match k.algorithm.parameters
+                Some(_) => test.fail("RFC 8410 says the parameters are absent")
+                None    => test.assert_eq(1, 1)
+            match asn1pkix.write_spki(k)
+                Ok(out) => test.assert_eq(bytes.to_hex(out), bytes.to_hex(rfc8410_public_key()))
+                Err(e)  => test.fail(e.message())
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_a_distinguished_name_prints_as_rfc_4514_text()
+    // For a log line and for a person — NOT for comparison, which
+    // compares encodings.
+    let cn = AsnAttribute { oid: asn1oid.oid_common_name(), value: "example.com" }
+    let o = AsnAttribute { oid: asn1oid.oid_organization_name(), value: "Acme" }
+    let n = AsnName { rdns: [AsnRdn { attributes: [cn] }, AsnRdn { attributes: [o] }],
+        span: AsnSpan { off: 0, len: 0 } }
+    test.assert_eq(asn1pkix.name_text(n), "O=Acme,CN=example.com")
+    match asn1pkix.attribute_value(n, asn1oid.oid_common_name())
+        Some(v) => test.assert_eq(v, "example.com")
+        None    => test.fail("the name carries a common name")
+    match asn1pkix.attribute_value(n, asn1oid.oid_country_name())
+        Some(_) => test.fail("the name carries no country")
+        None    => test.assert_eq(1, 1)
+
+@test
+fn test_an_ecdsa_signature_is_a_der_sequence_and_not_sixty_four_bytes()
+    // The conversion every ECDSA bug is about: DER writes each half as
+    // a shortest-form INTEGER, so an `r` whose top byte is zero is 31
+    // bytes, and a verifier that fed those in unpadded would be
+    // verifying a different number.
+    let r = bytes.from_hex("00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff") ?? bytes.zeros(0)
+    let s = bytes.from_hex("7f112233445566778899aabbccddeeff00112233445566778899aabbccddeeff") ?? bytes.zeros(0)
+    match asn1pkix.ecdsa_signature_der(r, s)
+        Ok(der) =>
+            match asn1pkix.ecdsa_signature_rs(der, 32, asn1read.default_limits())
+                Ok(back) =>
+                    test.assert_eq(bytes.len(back.r), 32)
+                    test.assert_eq(bytes.len(back.s), 32)
+                    test.assert_eq(bytes.to_hex(back.r), bytes.to_hex(r))
+                    test.assert_eq(bytes.to_hex(back.s), bytes.to_hex(s))
+                Err(e)   => test.fail(e.message())
+        Err(e)  => test.fail(e.message())
+
+// ── the rest of the surface, called once at its declared types ──────
+//
+// Every assertion below is red today for the same reason as every
+// assertion above, and each one is here for a second reason: a
+// signature nothing calls is a signature the compiler has checked
+// against no call site.  These name the functions the sections above
+// did not, at real arguments, so that a type that cannot be passed is
+// found now rather than by the first person to try.
+
+// `30 06 02 01 07 02 01 08` — a SEQUENCE of two INTEGERs, which is the
+// smallest document with structure in it.
+fn two_integers() -> Bytes
+    bytes.from_hex("3006020107020108") ?? bytes.zeros(0)
+
+// `30 0f 06 07 2a 86 48 ce 3d 02 01 06 04 2b 65 70 00` is not a real
+// structure; the tests below that need one use the RFC samples.
+fn a_context_value() -> Bytes
+    bytes.from_hex("a003020107") ?? bytes.zeros(0)
+
+@test
+fn test_a_context_tag_is_read_three_ways_and_the_names_say_which()
+    // Explicit and implicit tagging is the distinction that costs an
+    // afternoon: an EXPLICIT `[0] INTEGER` is two headers, an IMPLICIT
+    // one is an INTEGER whose identifier was replaced.
+    let der = a_context_value()
+    let lim = asn1read.default_limits()
+    match asn1read.expect_context_at(der, 0, 0, lim)
+        Ok(s)  => test.assert_eq(s.len, 3)
+        Err(e) => test.fail(e.message())
+    match asn1read.explicit_at(der, 0, 0, lim)
+        Ok(s)  => test.assert_eq(s.len, 1)
+        Err(e) => test.fail(e.message())
+    match asn1read.implicit_at(der, 0, 0, lim)
+        Ok(s)  => test.assert_eq(s.len, 3)
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_peeking_is_how_an_optional_field_is_read()
+    // Look, and move on if it is not there.
+    match asn1read.peek_tag_at(two_integers(), 0, asn1read.default_limits())
+        Ok(t)  =>
+            test.assert_eq(t.number, 16)
+            test.assert_eq(t.constructed, true)
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_copying_a_span_out_is_the_one_call_that_allocates()
+    // Named so that a caller can see where the copy happens; everything
+    // else answers spans into the caller's own bytes.
+    let der = two_integers()
+    match asn1read.content_span_at(der, 0, asn1read.default_limits())
+        Ok(s)  => test.assert_eq(bytes.to_hex(asn1read.span_bytes(der, s)), "020107020108")
+        Err(e) => test.fail(e.message())
+
+// A source with nothing in it, and no effect at all.
+//
+// `drain` is called against it for the type check rather than for the
+// bytes: every body under it is a `todo()` today, so the call panics
+// before it reads anything.  What the test proves is the SIGNATURE —
+// that a `core` package can take a caller's stream and be charged what
+// that stream costs.
+struct AsnEmptySource
+    at_end: Bool
+
+impl Read[] for AsnEmptySource
+    fn read(self, n: Int) -> Result<Bytes, IoError> []
+        Ok(bytes.zeros(0))
+
+@test
+fn test_the_bound_effect_parameter_costs_what_the_source_costs()
+    let r = asn1read.reader(asn1read.default_limits())
+    match asn1read.drain(r, AsnEmptySource { at_end: true }, 0)
+        Ok(s)  => test.assert_eq(s.events.len(), 0)
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_the_three_string_readers_answer_text()
+    // `0c 02 68 69` UTF8String "hi"; `13 02 48 49` PrintableString
+    // "HI"; `16 02 68 69` IA5String "hi".
+    let lim = asn1read.default_limits()
+    let u = bytes.from_hex("0c026869") ?? bytes.zeros(0)
+    let p = bytes.from_hex("13024849") ?? bytes.zeros(0)
+    let i = bytes.from_hex("16026869") ?? bytes.zeros(0)
+    match asn1univ.utf8_string_at(u, 0, lim)
+        Ok(s)  => test.assert_eq(s, "hi")
+        Err(e) => test.fail(e.message())
+    match asn1univ.printable_string_at(p, 0, lim)
+        Ok(s)  => test.assert_eq(s, "HI")
+        Err(e) => test.fail(e.message())
+    match asn1univ.ia5_string_at(i, 0, lim)
+        Ok(s)  => test.assert_eq(s, "hi")
+        Err(e) => test.fail(e.message())
+    // And any of the three, which is what a DirectoryString needs: a
+    // parser that demanded one would fail on half the certificates in
+    // the world.
+    match asn1univ.any_string_at(p, 0, lim)
+        Ok(s)  => test.assert_eq(s, "HI")
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_a_sequence_a_set_and_a_set_of_each_answer_their_children()
+    let lim = asn1read.default_limits()
+    let seq = two_integers()
+    // `31 06 02 01 07 02 01 08` — the same two values as a SET.
+    let set = bytes.from_hex("3106020107020108") ?? bytes.zeros(0)
+    match asn1univ.sequence_at(seq, 0, lim)
+        Ok(kids) => test.assert_eq(kids.len(), 2)
+        Err(e)   => test.fail(e.message())
+    match asn1univ.set_at(set, 0, lim)
+        Ok(kids) => test.assert_eq(kids.len(), 2)
+        Err(e)   => test.fail(e.message())
+    // Ascending by encoding, which DER requires so that one set of
+    // values has one encoding.
+    match asn1univ.set_of_at(set, 0, lim)
+        Ok(kids) => test.assert_eq(kids.len(), 2)
+        Err(e)   => test.fail(e.message())
+
+@test
+fn test_a_set_of_out_of_order_is_a_second_encoding_of_one_value()
+    // `31 06 02 01 08 02 01 07` — the same two INTEGERs, descending.
+    let set = bytes.from_hex("3106020108020107") ?? bytes.zeros(0)
+    match asn1univ.set_of_at(set, 0, asn1read.default_limits())
+        Ok(_)  => test.fail("DER sorts a SET OF by its encodings")
+        Err(e) =>
+            match e
+                AsnSetOfNotSorted(_) => test.assert_eq(asn1err.is_der_only(e), true)
+                _                    => test.fail("expected AsnSetOfNotSorted: ${e.message()}")
+
+@test
+fn test_the_remaining_sizes_are_header_plus_content()
+    test.assert_eq(asn1write.integer_bytes_len(bytes.zeros(1)), 3)
+    test.assert_eq(asn1write.bit_string_len(32), 35)
+    match asn1write.oid_len(asn1oid.oid_ed25519())
+        Ok(n)  => test.assert_eq(n, 5)
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_sorting_a_set_of_is_published_because_the_rule_is_a_sentence()
+    let a = bytes.from_hex("020107") ?? bytes.zeros(0)
+    let b = bytes.from_hex("020108") ?? bytes.zeros(0)
+    let sorted = asn1write.sort_set_of([b, a])
+    test.assert_eq(sorted.len(), 2)
+    test.assert_eq(bytes.to_hex(sorted[0]), "020107")
+
+fn ok_builder(r: Result<AsnBuilder, AsnEncodeError>) -> AsnBuilder
+    match r
+        Ok(b)  => b
+        Err(e) =>
+            test.fail(e.message())
+            asn1write.builder(asn1write.build_limits())
+
+@test
+fn test_the_builder_reports_its_own_state()
+    let b = asn1write.builder(asn1write.build_limits())
+    test.assert_eq(asn1write.builder_depth(b), 0)
+    test.assert_eq(asn1write.builder_len(b), 0)
+    test.assert_eq(asn1write.build_limits().max_depth, 64)
+    let inner = ok_builder(asn1write.begin_sequence(b))
+    test.assert_eq(asn1write.builder_depth(inner), 1)
+
+@test
+fn test_every_builder_put_takes_the_value_its_name_says()
+    let b0 = asn1write.builder(asn1write.build_limits())
+    let b1 = ok_builder(asn1write.begin_sequence(b0))
+    let b2 = ok_builder(asn1write.put_boolean(b1, true))
+    let b3 = ok_builder(asn1write.put_integer_bytes(b2, bytes.zeros(1)))
+    let b4 = ok_builder(asn1write.put_null(b3))
+    let b5 = ok_builder(asn1write.put_octet_string(b4, bytes.zeros(2)))
+    let b6 = ok_builder(asn1write.put_bit_string(b5, 0, bytes.zeros(2)))
+    let b7 = ok_builder(asn1write.put_oid(b6, asn1oid.oid_ed25519()))
+    let b8 = ok_builder(asn1write.put_utf8_string(b7, "hi"))
+    let b9 = ok_builder(asn1write.put_printable_string(b8, "HI"))
+    let b10 = ok_builder(asn1write.put_ia5_string(b9, "hi"))
+    let b11 = ok_builder(asn1write.put_encoded(b10, two_integers()))
+    let b12 = ok_builder(asn1write.end(b11))
+    test.assert_eq(asn1write.builder_depth(b12), 0)
+
+@test
+fn test_the_time_a_builder_writes_is_chosen_by_the_year()
+    // RFC 5280's own rule, as one call, because a caller writing a
+    // validity period should not have to know where the boundary is.
+    match civil.date(2026, 9, 11)
+        Ok(d)  =>
+            let t = civil.datetime(d, civil.midnight())
+            let b = ok_builder(asn1write.put_time(asn1write.builder(asn1write.build_limits()), t))
+            test.assert_eq(asn1write.builder_len(b), 15)
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_a_set_and_a_set_of_are_opened_by_different_calls()
+    // A flag would let a caller forget which kind it opened, and the
+    // sorting is the whole difference.
+    let b = asn1write.builder(asn1write.build_limits())
+    test.assert_eq(asn1write.builder_depth(ok_builder(asn1write.begin_set(b))), 1)
+    test.assert_eq(asn1write.builder_depth(ok_builder(asn1write.begin_set_of(b))), 1)
+    test.assert_eq(asn1write.builder_depth(ok_builder(asn1write.begin_explicit(b, 0))), 1)
+
+// ── the PKIX surface the RFC samples do not reach ───────────────────
+
+fn an_ec_spki() -> AsnSubjectPublicKeyInfo
+    AsnSubjectPublicKeyInfo {
+        algorithm: AsnAlgorithmId { algorithm: asn1oid.oid_ec_public_key(),
+            parameters: Some(bytes.from_hex("06082a8648ce3d030107") ?? bytes.zeros(0)) },
+        public_key: AsnBitString { unused_bits: 0, data: bytes.zeros(65) } }
+
+@test
+fn test_an_algorithm_identifier_is_read_at_an_offset()
+    // `30 05 06 03 2b 65 70` — the Ed25519 AlgorithmIdentifier, with
+    // its parameters absent.
+    let der = bytes.from_hex("300506032b6570") ?? bytes.zeros(0)
+    match asn1pkix.algorithm_at(der, 0, asn1read.default_limits())
+        Ok(a)  => test.assert_eq(asn1oid.oid_text(a.algorithm), "1.3.101.112")
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_a_public_key_is_read_at_an_offset_too()
+    match asn1pkix.spki_at(rfc8410_public_key(), 0, asn1read.default_limits())
+        Ok(k)  => test.assert_eq(bytes.len(k.public_key.data), 32)
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_an_ec_key_answers_the_point_the_crypto_package_takes()
+    let k = an_ec_spki()
+    match asn1pkix.ec_curve_oid(k)
+        Ok(o)  => test.assert_eq(asn1oid.oid_text(o), "1.2.840.10045.3.1.7")
+        Err(e) => test.fail(e.message())
+    match asn1pkix.ec_public_key_xy(k)
+        Ok(p)  =>
+            test.assert_eq(bytes.len(p.x), 32)
+            test.assert_eq(bytes.len(p.y), 32)
+        Err(e) => test.fail(e.message())
+    // And the whole uncompressed point, `04` included.
+    match asn1pkix.ec_public_key_point(k)
+        Ok(raw) => test.assert_eq(bytes.len(raw), 65)
+        Err(e)  => test.fail(e.message())
+
+@test
+fn test_an_ec_spki_is_built_from_the_two_halves_p256_nv_answers()
+    match asn1pkix.ec_spki(asn1oid.oid_prime256v1(), bytes.zeros(32), bytes.zeros(32))
+        Ok(k)  => test.assert_eq(bytes.len(k.public_key.data), 65)
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_an_ec_private_key_has_its_scalar_one_layer_down()
+    // The privateKey OCTET STRING of a PKCS#8 EC key is itself a DER
+    // ECPrivateKey SEQUENCE, and the scalar is the OCTET STRING inside
+    // THAT.
+    let pki = AsnPrivateKeyInfo { version: 0,
+        algorithm: AsnAlgorithmId { algorithm: asn1oid.oid_ec_public_key(),
+            parameters: Some(bytes.from_hex("06082a8648ce3d030107") ?? bytes.zeros(0)) },
+        private_key: bytes.zeros(0), attributes: None }
+    match asn1pkix.ec_private_key_scalar(pki)
+        Ok(_)  => test.fail("an empty privateKey holds no ECPrivateKey")
+        Err(e) => test.assert_eq(asn1err.decode_offset(e) >= 0, true)
+    match asn1pkix.write_pkcs8(pki)
+        Ok(out) => test.assert_eq(bytes.len(out) > 0, true)
+        Err(e)  => test.fail(e.message())
+
+@test
+fn test_an_empty_document_is_not_a_certificate()
+    let lim = asn1read.default_limits()
+    match asn1pkix.parse_certificate(bytes.zeros(0), lim)
+        Ok(_)  => test.fail("nothing is not a certificate")
+        Err(e) =>
+            match e
+                AsnTruncated(_, _) => test.assert_eq(1, 1)
+                _                  => test.fail("expected AsnTruncated: ${e.message()}")
+    match asn1pkix.name_at(bytes.zeros(0), 0, lim)
+        Ok(_)  => test.fail("nothing is not a name")
+        Err(e) => test.assert_eq(asn1err.decode_offset(e) >= 0, true)
+
+@test
+fn test_two_names_are_compared_by_their_encodings_and_not_their_text()
+    // RFC 5280's full name-matching rules are a specification of their
+    // own, and this package says so rather than half-implementing them.
+    let cn = AsnAttribute { oid: asn1oid.oid_common_name(), value: "example.com" }
+    let n = AsnName { rdns: [AsnRdn { attributes: [cn] }], span: AsnSpan { off: 0, len: 0 } }
+    let der = two_integers()
+    test.assert_eq(asn1pkix.names_encode_equal(der, n, der, n), true)
+
+// A certificate assembled by hand, so that the accessors have
+// something to answer.  Not a real certificate: the fields are the
+// shapes rather than a signed document, which is what makes it a
+// fixture for the SURFACE rather than for the parser.
+fn a_certificate() -> AsnCertificate
+    AsnCertificate { version: 3, serial: bytes.zeros(20),
+        signature_algorithm: AsnAlgorithmId { algorithm: asn1oid.oid_ecdsa_with_sha256(),
+            parameters: None },
+        issuer: AsnName { rdns: [], span: AsnSpan { off: 0, len: 0 } },
+        subject: AsnName { rdns: [], span: AsnSpan { off: 0, len: 0 } },
+        not_before: an_instant(2026, 1, 1), not_after: an_instant(2027, 1, 1),
+        public_key: an_ec_spki(), extensions: [],
+        outer_algorithm: AsnAlgorithmId { algorithm: asn1oid.oid_ecdsa_with_sha256(),
+            parameters: None },
+        signature: AsnBitString { unused_bits: 0, data: bytes.zeros(70) },
+        tbs: AsnSpan { off: 4, len: 100 } }
+
+fn an_instant(y: Int, m: Int, d: Int) -> CivilDateTime
+    match civil.date(y, m, d)
+        Ok(dd) => civil.datetime(dd, civil.midnight())
+        Err(_) =>
+            test.fail("that is a date")
+            civil.datetime(civil.date_from_epoch_day(0), civil.midnight())
+
+@test
+fn test_the_two_algorithm_identifiers_must_agree()
+    // The outer one is what a verifier would pick and the inner one is
+    // what is signed, so a mismatch is a substitution nobody would
+    // notice.
+    test.assert_eq(asn1pkix.algorithms_agree(a_certificate()), true)
+
+@test
+fn test_validity_is_checked_against_a_time_the_caller_supplies()
+    // Because a `core` package has no clock, and because a test that
+    // pins an expiry needs to choose the moment anyway.
+    let c = a_certificate()
+    test.assert_eq(asn1pkix.is_valid_at(c, an_instant(2026, 6, 1)), true)
+    test.assert_eq(asn1pkix.is_valid_at(c, an_instant(2025, 6, 1)), false)
+    test.assert_eq(asn1pkix.is_valid_at(c, an_instant(2028, 6, 1)), false)
+
+@test
+fn test_a_certificates_extensions_are_looked_up_by_oid()
+    let c = a_certificate()
+    let lim = asn1read.default_limits()
+    test.assert_eq(asn1pkix.extensions_of(c).len(), 0)
+    test.assert_eq(asn1pkix.unknown_critical_extensions(c).len(), 0)
+    match asn1pkix.extension_by_oid(c, asn1oid.oid_key_usage())
+        Some(_) => test.fail("the fixture carries no extensions")
+        None    => test.assert_eq(1, 1)
+    match asn1pkix.basic_constraints(c, lim)
+        Ok(b)  =>
+            match b
+                Some(_) => test.fail("the fixture carries no basicConstraints")
+                None    => test.assert_eq(1, 1)
+        Err(e) => test.fail(e.message())
+    match asn1pkix.key_usage(c, lim)
+        Ok(k)  =>
+            match k
+                Some(_) => test.fail("the fixture carries no keyUsage")
+                None    => test.assert_eq(1, 1)
+        Err(e) => test.fail(e.message())
+    match asn1pkix.subject_alt_dns_names(c, lim)
+        Ok(ns) => test.assert_eq(ns.len(), 0)
+        Err(e) => test.fail(e.message())
+    match asn1pkix.ext_key_usage_oids(c, lim)
+        Ok(os) => test.assert_eq(os.len(), 0)
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_a_certificates_signature_bytes_come_out_of_its_bit_string()
+    match asn1pkix.signature_bytes(a_certificate())
+        Ok(b)  => test.assert_eq(bytes.len(b), 70)
+        Err(e) => test.fail(e.message())

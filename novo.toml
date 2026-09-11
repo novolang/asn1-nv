@@ -1,0 +1,59 @@
+[package]
+name        = "asn1-nv"
+version     = "0.0.1"
+description = "DER, and enough BER to read what is already deployed: tag-length-value as a feed-and-drain reader with a depth bound, a writer into a caller's buffer, the universal types with OBJECT IDENTIFIER arc arithmetic and times over calendar-nv, and one application module — the PKIX structures the crypto tier parses keys and certificates out of.  No signature verification.  Interface only — every body is a todo()."
+license     = "Apache-2.0"
+
+# An INTERFACE release: every `pub fn` body is a `todo()`, so the
+# signatures and the effect rows are published and nothing is
+# implemented.  `novo pkg publish` recognises the shape and requires
+# both the draft stability and the 0.0.x version; the first
+# implementation is the 0.1.0 published over it.
+stability   = "draft"
+
+# `core`: arithmetic over bytes the caller already holds.  No function
+# declares an effect; a certificate arrives as bytes the host read, and
+# `not_after` is compared against a time the caller supplies, because a
+# `core` package has no clock.
+#
+# It carries `tests/embedded_probe.nv`, so the device claim is BUILT —
+# for `asn1tag`, which is the half a microcontroller can use: the
+# identifier and length octets as integer arithmetic, with no buffer
+# and no allocation.  A device that checks a certificate's public key
+# against one it was provisioned with walks headers and compares an
+# OID, and that is exactly this module.
+layer       = "core"
+
+category    = "encoding"
+
+tags = ["asn1", "der", "ber", "x509", "pkcs8", "oid", "certificates", "embedded", "sans-io"]
+repository  = "https://github.com/novolang/asn1-nv"
+maintainers = ["novo-lang"]
+novo        = ">= 0.8.9"
+
+# A library: no `main`, so `novo pkg build` type-checks and
+# effect-checks every module under `src/` and writes no binary.
+
+[docs.pages]
+"README.md" = "Tag, length, value — and the certificate that is made of them"
+
+[dependencies]
+# calendar-nv turns UTCTime and GeneralizedTime into civil dates.  Both
+# are text in a fixed grammar — `YYMMDDHHMMSSZ` and
+# `YYYYMMDDHHMMSSZ` — and handing them over as unparsed strings would
+# push the two-digit-year rule onto every caller, which is precisely
+# the rule nobody should have to rediscover.  `core`, so the layer rule
+# holds.
+calendar-nv = "^0.0.2"
+
+# NOT a crypto package.  This one reads the STRUCTURE a key or a
+# certificate is written in and stops there: no digest, no signature
+# check, no chain building.  `asn1pkix.ec_public_key_point` hands the
+# bytes p256-nv's `public_key_from_bytes` takes, and what happens next
+# is that package's.  A parser that also verified would be a parser
+# nobody could audit separately from the arithmetic.
+#
+# NOT bitstream-nv.  A BIT STRING here is a byte count and a
+# leading-unused-bits number, which is two integers rather than a bit
+# reader, and the one place a bit index matters — a KeyUsage flag — is
+# a fixed lookup.

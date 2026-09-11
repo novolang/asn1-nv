@@ -1,0 +1,264 @@
+// asn1univ — the universal types, read out of spans and written into a
+// caller's buffer.
+//
+// Every body is a `todo()`.  The signatures are the design, and the
+// compiler checks them as claims; see the README for the stamp.
+//
+// EVERY READER TAKES AN OFFSET AND ANSWERS A VALUE.  `integer_at(src,
+// off, limits)` reads the whole tag-length-value at `off`, checks that
+// it is an INTEGER, and answers the number.  Nothing is copied that
+// does not have to be: a string comes back as a `Str` because that is
+// what a caller wants to do with it, and an INTEGER that does not fit
+// comes back as `Bytes` that point at the caller's own document.
+//
+// AN INTEGER HAS TWO READERS AND THAT IS NOT A CONVENIENCE.  A
+// certificate's serial number is twenty bytes and an RSA modulus is
+// 257, and neither fits a novo-lang `Int`.  `integer_at` answers a
+// number when it fits and `AsnIntegerTooLarge` when it does not;
+// `integer_bytes_at` answers the content whatever its length.  A
+// package with only the first would be unable to read a certificate,
+// and one with only the second would make a caller reassemble a version
+// number byte by byte.
+//
+// THE TWO TIME TYPES ARE ONE RULE APART.  UTCTime has a TWO-DIGIT YEAR:
+// 50 and above is 19xx, below 50 is 20xx, and that sliding window is
+// why a certificate valid past 2049 must use GeneralizedTime instead.
+// Handing the text over unparsed would push that rule onto every
+// caller, which is precisely the rule nobody should have to
+// rediscover — so both answer calendar-nv's `CivilDateTime`.
+//
+// DER REQUIRES UTC.  Both time types may carry a local offset in BER,
+// which means a certificate's validity would depend on where it is
+// read; `AsnTimeNotUtc` is the refusal, and `ber_tolerant` does NOT
+// lift it, because a certificate that expires at a different moment in
+// two places is not a thing this package will hand over.
+
+use std.bytes
+use asn1read
+
+// ── reading ─────────────────────────────────────────────────────────
+
+// The BOOLEAN at `off`.
+//
+// DER admits `0xff` for true and `0x00` for false and nothing else;
+// BER reads any non-zero byte as true, and `ber_tolerant` is the
+// switch.  `AsnBadBoolean` names the byte.
+pub fn boolean_at(src: Bytes, off: Int, limits: AsnLimits) -> Result<Bool, AsnDecodeError> []
+    todo("asn1univ.boolean_at")
+
+// The INTEGER at `off`, as a number.
+//
+// `AsnIntegerTooLarge` when the content is longer than a novo-lang
+// `Int` can hold — which is not a fault in the document, so the
+// refusal names the length and `integer_bytes_at` is the way through.
+//
+// ```novo
+// use std.bytes
+// use asn1read
+// use asn1univ
+//
+// fn main() [io]
+//     // `02 01 07` — the INTEGER 7.
+//     let der = bytes.from_hex("020107") ?? bytes.zeros(0)
+//     match asn1univ.integer_at(der, 0, asn1read.default_limits())
+//         Ok(n)  => println("${n}")   // 7
+//         Err(e) => println(e.message())
+// ```
+pub fn integer_at(src: Bytes, off: Int, limits: AsnLimits) -> Result<Int, AsnDecodeError> []
+    todo("asn1univ.integer_at")
+
+// The INTEGER at `off`, as its content bytes: two's complement,
+// big-endian, leading zero included when there is one.
+//
+// What a certificate's serial number and an RSA modulus need.  The
+// leading zero is not noise — it is what keeps a positive number from
+// looking negative, and a caller that stripped it and re-encoded would
+// produce different bytes and a different signature.
+pub fn integer_bytes_at(src: Bytes, off: Int, limits: AsnLimits) -> Result<Bytes, AsnDecodeError> []
+    todo("asn1univ.integer_bytes_at")
+
+// A BIT STRING: how many bits of the last byte are padding, and the
+// bytes.
+pub struct AsnBitString
+    // `0 ..= 7`.  The first content byte of the encoding.
+    unused_bits: Int
+    // The bits, packed most significant first, padding included in the
+    // last byte.
+    data: Bytes
+
+// The BIT STRING at `off`.
+//
+// `AsnBadBitString` for an unused count above 7, or a non-zero count on
+// empty content.
+pub fn bit_string_at(src: Bytes, off: Int,
+                     limits: AsnLimits) -> Result<AsnBitString, AsnDecodeError> []
+    todo("asn1univ.bit_string_at")
+
+// How many bits a BIT STRING holds: eight per byte, less the unused
+// count.
+pub fn bit_count(b: AsnBitString) -> Int []
+    todo("asn1univ.bit_count")
+
+// Whether bit `i` is set, counting from the most significant bit of the
+// first byte — which is bit 0, and is the numbering every ASN.1 module
+// uses.
+//
+// False for an index past the end rather than a refusal: a KeyUsage
+// extension may be two bits long and a caller asking about bit 5 wants
+// "not set", not an error.
+pub fn bit_at(b: AsnBitString, i: Int) -> Bool []
+    todo("asn1univ.bit_at")
+
+// The OCTET STRING at `off`, as its content.
+pub fn octet_string_at(src: Bytes, off: Int, limits: AsnLimits) -> Result<Bytes, AsnDecodeError> []
+    todo("asn1univ.octet_string_at")
+
+// The NULL at `off`, answering how many bytes it occupied: 2.
+//
+// A length rather than nothing, so a caller walking a structure by
+// offset can step past it the same way it steps past everything else.
+// `AsnNullWithContent` for a NULL with a length that is not zero.
+pub fn null_at(src: Bytes, off: Int, limits: AsnLimits) -> Result<Int, AsnDecodeError> []
+    todo("asn1univ.null_at")
+
+// The OBJECT IDENTIFIER at `off`.
+pub fn oid_at(src: Bytes, off: Int, limits: AsnLimits) -> Result<AsnOid, AsnDecodeError> []
+    todo("asn1univ.oid_at")
+
+// The UTF8String at `off`.
+//
+// `AsnBadStringBytes` for content that is not valid UTF-8, naming the
+// byte.
+pub fn utf8_string_at(src: Bytes, off: Int, limits: AsnLimits) -> Result<Str, AsnDecodeError> []
+    todo("asn1univ.utf8_string_at")
+
+// The PrintableString at `off`.
+//
+// The alphabet is restricted and is NOT the one most people guess: A-Z,
+// a-z, 0-9, space, and `' ( ) + , - . / : = ?` — no `@`, no `_`, no
+// `*`.  Every real certificate has a subject that could not be a
+// PrintableString for exactly that reason, which is why UTF8String won.
+pub fn printable_string_at(src: Bytes, off: Int,
+                           limits: AsnLimits) -> Result<Str, AsnDecodeError> []
+    todo("asn1univ.printable_string_at")
+
+// The IA5String at `off`: ASCII, `0x00 ..= 0x7f`.
+//
+// What an email address and a DNS name in a subject alternative name
+// are written in.
+pub fn ia5_string_at(src: Bytes, off: Int, limits: AsnLimits) -> Result<Str, AsnDecodeError> []
+    todo("asn1univ.ia5_string_at")
+
+// Any of the three string types at `off`, whichever it is.
+//
+// What a name parser calls: an X.500 attribute value is a
+// `DirectoryString`, which is UTF8String today and PrintableString in
+// anything old, and a parser that demanded one would fail on half the
+// certificates in the world.
+pub fn any_string_at(src: Bytes, off: Int, limits: AsnLimits) -> Result<Str, AsnDecodeError> []
+    todo("asn1univ.any_string_at")
+
+// The UTCTime at `off`, as a civil date and time.
+//
+// `YYMMDDHHMMSSZ`, and the two-digit year resolves by the sliding
+// window: 50 and above is 19xx, below 50 is 20xx.  `AsnTimeNotUtc`
+// when there is no `Z`, which `ber_tolerant` does NOT lift.
+//
+// ```novo
+// use std.bytes
+// use asn1read
+// use asn1univ
+// use civil
+//
+// fn main() [io]
+//     // `17 0d 32 36 30 39 31 31 30 30 30 30 30 30 5a` —
+//     // UTCTime "260911000000Z".
+//     let der = bytes.from_hex("170d3236303931313030303030305a") ?? bytes.zeros(0)
+//     match asn1univ.utc_time_at(der, 0, asn1read.default_limits())
+//         Ok(t)  => println("${t.date.year}")   // 2026
+//         Err(e) => println(e.message())
+// ```
+pub fn utc_time_at(src: Bytes, off: Int,
+                   limits: AsnLimits) -> Result<CivilDateTime, AsnDecodeError> []
+    todo("asn1univ.utc_time_at")
+
+// The GeneralizedTime at `off`, as a civil date and time.
+//
+// `YYYYMMDDHHMMSSZ`, with an optional fractional second DER requires to
+// be absent when it would be zero.  What a certificate valid past 2049
+// must use, and what every timestamp outside PKIX uses.
+pub fn generalized_time_at(src: Bytes, off: Int,
+                           limits: AsnLimits) -> Result<CivilDateTime, AsnDecodeError> []
+    todo("asn1univ.generalized_time_at")
+
+// Either time type at `off`, whichever it is.
+//
+// What a certificate's `notBefore` and `notAfter` are read with: RFC
+// 5280 says each is a CHOICE of the two, chosen by the year.
+pub fn any_time_at(src: Bytes, off: Int,
+                   limits: AsnLimits) -> Result<CivilDateTime, AsnDecodeError> []
+    todo("asn1univ.any_time_at")
+
+// The children of the SEQUENCE at `off`, as whole-value spans.
+//
+// `AsnUnexpectedTag` when the value is not a SEQUENCE.
+pub fn sequence_at(src: Bytes, off: Int, limits: AsnLimits) -> Result<[AsnSpan], AsnDecodeError> []
+    todo("asn1univ.sequence_at")
+
+// The children of the SET at `off`.
+//
+// A SET's order is not semantically significant, and `set_of_at` is the
+// one that checks DER's ordering rule.
+pub fn set_at(src: Bytes, off: Int, limits: AsnLimits) -> Result<[AsnSpan], AsnDecodeError> []
+    todo("asn1univ.set_at")
+
+// The children of the SET OF at `off`, with DER's ordering rule
+// applied.
+//
+// DER requires the elements to be in ascending order of their own
+// ENCODINGS, so that one set of values has one encoding.
+// `AsnSetOfNotSorted` when they are not, and `ber_tolerant` accepts it
+// — which is safe only when no signature is being checked over the
+// bytes.
+pub fn set_of_at(src: Bytes, off: Int, limits: AsnLimits) -> Result<[AsnSpan], AsnDecodeError> []
+    todo("asn1univ.set_of_at")
+
+// ── the alphabets, as predicates ────────────────────────────────────
+
+// Whether every character is one PrintableString allows.
+//
+// Published because a caller building a certificate request has to
+// choose between PrintableString and UTF8String, and the choice is
+// exactly this question.
+//
+// ```novo
+// use asn1univ
+//
+// fn main() [io]
+//     let a = asn1univ.is_printable_string("Acme Ltd")
+//     let b = asn1univ.is_printable_string("acme@example.com")
+//     println("${a} ${b}")   // true false
+// ```
+pub fn is_printable_string(s: Str) -> Bool []
+    todo("asn1univ.is_printable_string")
+
+// Whether every byte is `0x00 ..= 0x7f`.
+pub fn is_ia5_string(s: Str) -> Bool []
+    todo("asn1univ.is_ia5_string")
+
+// The two-digit year a UTCTime's `yy` stands for: `yy + 1900` at 50 and
+// above, `yy + 2000` below it.
+//
+// Named as a function because it is the rule the type is famous for,
+// and because a test that pins it is worth more than a comment.
+//
+// ```novo
+// use asn1univ
+//
+// fn main() [io]
+//     let a = asn1univ.utc_year(49)
+//     let b = asn1univ.utc_year(50)
+//     println("${a} ${b}")   // 2049 1950
+// ```
+pub fn utc_year(yy: Int) -> Int []
+    todo("asn1univ.utc_year")

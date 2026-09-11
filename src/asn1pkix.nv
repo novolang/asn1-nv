@@ -1,0 +1,434 @@
+// asn1pkix — the four structures the crypto tier parses keys and
+// certificates out of.
+//
+// Every body is a `todo()`.  The signatures are the design, and the
+// compiler checks them as claims; see the README for the stamp.
+//
+// WHAT THIS MODULE IS FOR.  p256-nv takes a public key as `x` and `y`
+// bytes and ed25519-nv takes thirty-two; nothing on the grid turns a
+// `.pem` file or a certificate into either.  This module is that step
+// and nothing beyond it: `ec_public_key_point` hands over exactly what
+// `p256.public_key_from_bytes` takes, `ed25519_public_key` hands over
+// exactly what `ed25519.verifying_key_from_bytes` takes, and what
+// happens next belongs to those packages.
+//
+// NO SIGNATURE VERIFICATION HERE, and the boundary is deliberate.  This
+// module reads a certificate's STRUCTURE — the serial, the names, the
+// validity, the key, the extensions, and the exact SPAN the signature
+// covers.  It computes no digest, checks no signature, builds no chain,
+// and knows nothing about trust.  A parser that also verified would be
+// a parser nobody could audit separately from the arithmetic, and the
+// arithmetic is where the mistakes live.
+//
+// `tbs` IS A SPAN AND NOT A COPY, and that is the single most important
+// decision in the module.  A certificate's signature is computed over
+// the DER BYTES of its TBSCertificate, exactly as they arrived — not
+// over a re-encoding of the values.  A parser that handed back parsed
+// fields and made the caller rebuild the bytes would produce a
+// different encoding for every certificate whose writer was not
+// byte-for-byte DER, and the signature would fail on documents that are
+// perfectly valid.  So the span points into the caller's own bytes and
+// the caller hashes those.
+//
+// WHAT IS NOT READ.  Chain building, revocation, name constraints,
+// policy mapping, CRLs and OCSP.  Extensions are carried as OID,
+// critical flag and raw value; four are named because a caller almost
+// always wants them, and the rest are handed over whole.
+
+use std.bytes
+use asn1read
+use asn1oid
+use asn1univ
+
+// An algorithm and its parameters, which is what every place PKIX names
+// an algorithm looks like.
+//
+// `parameters` is `?Bytes` and holds the whole encoded value when there
+// is one.  The distinction that matters: an EC key's parameters are the
+// curve's OID, and an Ed25519 key's parameters are ABSENT — not NULL.
+// RFC 8410 says so explicitly, and a writer that emitted `05 00` there
+// produces a key half the world refuses.
+pub struct AsnAlgorithmId
+    algorithm: AsnOid
+    parameters: ?Bytes
+
+// A public key, as a `.pem` file or a certificate carries one.
+//
+// `SubjectPublicKeyInfo` in RFC 5280's ASN.1 module, and the structure
+// every `-----BEGIN PUBLIC KEY-----` block holds.
+pub struct AsnSubjectPublicKeyInfo
+    algorithm: AsnAlgorithmId
+    // The key itself.  A BIT STRING with zero unused bits in everything
+    // PKIX writes; the bytes inside it are the algorithm's own format,
+    // which for EC is a point and for Ed25519 is thirty-two bytes.
+    public_key: AsnBitString
+
+// A private key, as PKCS#8 carries one.
+//
+// `PrivateKeyInfo` in RFC 5208, and what a `-----BEGIN PRIVATE KEY-----`
+// block holds — as against `BEGIN EC PRIVATE KEY`, which is the older
+// SEC 1 form this package does not read and names in the README.
+pub struct AsnPrivateKeyInfo
+    // 0 for PKCS#8 v1, 1 for the v2 form that also carries a public
+    // key.  `AsnUnsupportedVersion` above 1.
+    version: Int
+    algorithm: AsnAlgorithmId
+    // The key material, as an OCTET STRING's content.  For EC that is
+    // itself a DER `ECPrivateKey` structure; for Ed25519 it is an
+    // OCTET STRING holding the thirty-two-byte seed, which is a second
+    // layer of wrapping RFC 8410 requires and everyone forgets.
+    private_key: Bytes
+    // The `[0] attributes`, whole and unparsed, when there are any.
+    attributes: ?Bytes
+
+// One extension of one certificate.
+pub struct AsnExtension
+    oid: AsnOid
+    // When true, a reader that does not understand this extension MUST
+    // refuse the certificate.  That is the rule the flag exists for,
+    // and it is the caller's to apply.
+    critical: Bool
+    // The extension's own DER, whole.  Its structure depends on the
+    // OID, and the four this module names have readers below.
+    value: Bytes
+
+// One attribute of one relative distinguished name: `CN=example.com`.
+pub struct AsnAttribute
+    oid: AsnOid
+    // The value as text.  A `DirectoryString` is UTF8String today and
+    // PrintableString in anything old, and `asn1univ.any_string_at`
+    // reads either.
+    value: Str
+
+// One relative distinguished name: a SET of attributes, almost always
+// of exactly one.
+pub struct AsnRdn
+    attributes: [AsnAttribute]
+
+// A distinguished name: a SEQUENCE of relative names, outermost first.
+pub struct AsnName
+    rdns: [AsnRdn]
+    // The span the whole name occupies in the caller's bytes.  Kept
+    // because comparing two names for a chain is comparing their
+    // ENCODINGS, and re-encoding a parsed name is how a comparison
+    // starts failing on certificates that are perfectly valid.
+    span: AsnSpan
+
+// An X.509 certificate, read.
+pub struct AsnCertificate
+    // 1, 2 or 3 — the `[0] version` field holds 0, 1 or 2, and this is
+    // that plus one, which is how everyone writes it.
+    version: Int
+    // The serial number as its INTEGER content bytes, leading zero
+    // included.  Bytes and not a number because twenty bytes is the
+    // usual size and none of them fit an `Int`.
+    serial: Bytes
+    // The algorithm named INSIDE the TBSCertificate.
+    signature_algorithm: AsnAlgorithmId
+    issuer: AsnName
+    subject: AsnName
+    not_before: CivilDateTime
+    not_after: CivilDateTime
+    public_key: AsnSubjectPublicKeyInfo
+    extensions: [AsnExtension]
+    // The algorithm named OUTSIDE the TBSCertificate, beside the
+    // signature.  RFC 5280 requires the two to be equal and a
+    // certificate where they are not is a certificate to refuse —
+    // which is the caller's check to make, and `algorithms_agree` is
+    // the one call.
+    outer_algorithm: AsnAlgorithmId
+    signature: AsnBitString
+    // The span of the TBSCertificate, exactly as it arrived.  THE
+    // BYTES THE SIGNATURE COVERS, and the reason this module answers
+    // spans rather than copies.
+    tbs: AsnSpan
+
+// ── reading ─────────────────────────────────────────────────────────
+
+// An AlgorithmIdentifier at `off`.
+pub fn algorithm_at(src: Bytes, off: Int,
+                    limits: AsnLimits) -> Result<AsnAlgorithmId, AsnDecodeError> []
+    todo("asn1pkix.algorithm_at")
+
+// A SubjectPublicKeyInfo at `off`.
+//
+// ```novo
+// use std.bytes
+// use asn1read
+// use asn1pkix
+//
+// fn main() [io]
+//     let der = bytes.zeros(0)
+//     match asn1pkix.spki_at(der, 0, asn1read.default_limits())
+//         Ok(k)  => println("${k.public_key.unused_bits}")
+//         Err(e) => println(e.message())
+// ```
+pub fn spki_at(src: Bytes, off: Int,
+               limits: AsnLimits) -> Result<AsnSubjectPublicKeyInfo, AsnDecodeError> []
+    todo("asn1pkix.spki_at")
+
+// A whole `.der` file holding one SubjectPublicKeyInfo.
+//
+// `read_document` and `spki_at` in one call, with trailing bytes
+// refused — because a public key file is exactly one value.
+pub fn parse_spki(src: Bytes,
+                  limits: AsnLimits) -> Result<AsnSubjectPublicKeyInfo, AsnDecodeError> []
+    todo("asn1pkix.parse_spki")
+
+// A whole `.der` file holding one PKCS#8 PrivateKeyInfo.
+pub fn parse_pkcs8(src: Bytes, limits: AsnLimits) -> Result<AsnPrivateKeyInfo, AsnDecodeError> []
+    todo("asn1pkix.parse_pkcs8")
+
+// A whole `.der` file holding one X.509 certificate.
+pub fn parse_certificate(src: Bytes, limits: AsnLimits) -> Result<AsnCertificate, AsnDecodeError> []
+    todo("asn1pkix.parse_certificate")
+
+// A distinguished name at `off`.
+pub fn name_at(src: Bytes, off: Int, limits: AsnLimits) -> Result<AsnName, AsnDecodeError> []
+    todo("asn1pkix.name_at")
+
+// The extensions of a certificate, in the order they were written.
+//
+// Order is kept because a certificate's extensions are part of the
+// signed bytes, and a caller re-emitting one must not reorder them.
+pub fn extensions_of(c: AsnCertificate) -> [AsnExtension] []
+    todo("asn1pkix.extensions_of")
+
+// The extension with this OID, or `None`.
+pub fn extension_by_oid(c: AsnCertificate, o: AsnOid) -> ?AsnExtension []
+    todo("asn1pkix.extension_by_oid")
+
+// Every extension marked critical whose OID this package does not
+// name.
+//
+// The list a caller has to act on: RFC 5280 says a reader that does not
+// understand a critical extension MUST refuse the certificate, and this
+// is the one call that answers "is there anything here I do not
+// understand".
+pub fn unknown_critical_extensions(c: AsnCertificate) -> [AsnExtension] []
+    todo("asn1pkix.unknown_critical_extensions")
+
+// ── the four extensions worth naming ────────────────────────────────
+
+// The `basicConstraints` extension's two fields: whether this
+// certificate may sign others, and how many may sit below it.
+pub struct AsnBasicConstraints
+    is_ca: Bool
+    // -1 when the extension named no path length, which means
+    // unlimited.  -1 rather than an optional because every caller of
+    // this compares it against a depth.
+    path_len: Int
+
+// The `basicConstraints` extension, read.
+pub fn basic_constraints(c: AsnCertificate,
+                         limits: AsnLimits) -> Result<?AsnBasicConstraints, AsnDecodeError> []
+    todo("asn1pkix.basic_constraints")
+
+// The `keyUsage` extension as a BIT STRING, or `None`.
+//
+// A BIT STRING and not a set of booleans, because the bit numbering IS
+// the standard's — `digitalSignature` is bit 0, `keyCertSign` is bit 5
+// — and `asn1univ.bit_at` reads it with the same numbering the ASN.1
+// module uses.
+pub fn key_usage(c: AsnCertificate, limits: AsnLimits) -> Result<?AsnBitString, AsnDecodeError> []
+    todo("asn1pkix.key_usage")
+
+// The DNS names in the `subjectAltName` extension.
+//
+// Where a certificate's hostnames actually live.  A reader that matched
+// a hostname against the common name and not this one has been wrong
+// since 2011, which is why this is the named call and the common name
+// is not.
+pub fn subject_alt_dns_names(c: AsnCertificate,
+                             limits: AsnLimits) -> Result<[Str], AsnDecodeError> []
+    todo("asn1pkix.subject_alt_dns_names")
+
+// The OIDs in the `extKeyUsage` extension.
+pub fn ext_key_usage_oids(c: AsnCertificate,
+                          limits: AsnLimits) -> Result<[AsnOid], AsnDecodeError> []
+    todo("asn1pkix.ext_key_usage_oids")
+
+// ── what the crypto packages take ───────────────────────────────────
+
+// The uncompressed point bytes of an EC public key: `04`, then `x`,
+// then `y`.
+//
+// Exactly what `p256.public_key_from_bytes` takes, once the caller has
+// split it — and `ec_public_key_xy` does that split.
+// `AsnUnexpectedTag` when the algorithm is not `id-ecPublicKey`;
+// `AsnMissingField` when the curve parameters are absent, because an EC
+// key without a curve is not a key.
+pub fn ec_public_key_point(k: AsnSubjectPublicKeyInfo) -> Result<Bytes, AsnDecodeError> []
+    todo("asn1pkix.ec_public_key_point")
+
+// The `x` and `y` halves of an EC public key, each 32 bytes for P-256.
+pub struct AsnEcPoint
+    x: Bytes
+    y: Bytes
+
+// The `x` and `y` of an EC public key, with the `04` prefix removed and
+// the halves split.
+//
+// A COMPRESSED point — one whose first byte is `02` or `03` — is
+// `AsnMissingField` naming `"uncompressed point"`, because decompressing
+// it is a square root in the curve's field and that is p256-nv's
+// arithmetic rather than a parser's.
+pub fn ec_public_key_xy(k: AsnSubjectPublicKeyInfo) -> Result<AsnEcPoint, AsnDecodeError> []
+    todo("asn1pkix.ec_public_key_xy")
+
+// The curve an EC key names, as its OID.
+//
+// `oid_prime256v1` is the one p256-nv reads; anything else is a curve
+// this grid has no package for, and telling a caller which one is more
+// use than refusing.
+pub fn ec_curve_oid(k: AsnSubjectPublicKeyInfo) -> Result<AsnOid, AsnDecodeError> []
+    todo("asn1pkix.ec_curve_oid")
+
+// The thirty-two bytes of an Ed25519 public key.
+//
+// Exactly what `ed25519.verifying_key_from_bytes` takes.
+// `AsnUnexpectedTag` when the algorithm is not `id-Ed25519`.
+pub fn ed25519_public_key(k: AsnSubjectPublicKeyInfo) -> Result<Bytes, AsnDecodeError> []
+    todo("asn1pkix.ed25519_public_key")
+
+// The private scalar of an EC key in PKCS#8, as bytes.
+//
+// The `privateKey` OCTET STRING of a PKCS#8 EC key is itself a DER
+// `ECPrivateKey` SEQUENCE, and the scalar is the OCTET STRING inside
+// THAT.  One layer of nesting people forget, and the reason this is a
+// function rather than a field.
+pub fn ec_private_key_scalar(k: AsnPrivateKeyInfo) -> Result<Bytes, AsnDecodeError> []
+    todo("asn1pkix.ec_private_key_scalar")
+
+// The thirty-two-byte seed of an Ed25519 key in PKCS#8.
+//
+// Exactly what `ed25519.signing_key_from_seed` takes.  The seed is
+// inside an OCTET STRING inside the `privateKey` OCTET STRING — a
+// second layer of wrapping RFC 8410 requires and everyone forgets, and
+// a parser that skipped it hands over thirty-four bytes that look
+// nearly right.
+pub fn ed25519_seed(k: AsnPrivateKeyInfo) -> Result<Bytes, AsnDecodeError> []
+    todo("asn1pkix.ed25519_seed")
+
+// The raw signature bytes of a certificate, from its BIT STRING.
+//
+// For ECDSA that is a DER `SEQUENCE { r INTEGER, s INTEGER }` and NOT
+// the sixty-four fixed bytes a verifier wants; `ecdsa_signature_rs` is
+// the one that splits it.  For Ed25519 it is the sixty-four bytes
+// directly.
+pub fn signature_bytes(c: AsnCertificate) -> Result<Bytes, AsnDecodeError> []
+    todo("asn1pkix.signature_bytes")
+
+// The `r` and `s` of an ECDSA signature, each padded to `width` bytes.
+pub struct AsnEcdsaSig
+    r: Bytes
+    s: Bytes
+
+// An ECDSA signature's `r` and `s`, from the DER SEQUENCE it travels
+// in, each left-padded to `width` bytes.
+//
+// 32 for P-256.  The padding is the point: DER writes each as a
+// shortest-form INTEGER, so an `r` whose top byte is zero is 31 bytes,
+// and a verifier that fed those bytes in unpadded would be verifying a
+// different number.  This is the conversion every ECDSA bug is about.
+pub fn ecdsa_signature_rs(sig: Bytes, width: Int,
+                          limits: AsnLimits) -> Result<AsnEcdsaSig, AsnDecodeError> []
+    todo("asn1pkix.ecdsa_signature_rs")
+
+// An ECDSA signature's DER bytes, from `r` and `s`.
+//
+// The inverse, for a caller that signed and needs to put the result in
+// a certificate: each half as a shortest-form INTEGER, leading zero
+// added when the top bit is set, inside a SEQUENCE.
+pub fn ecdsa_signature_der(r: Bytes, s: Bytes) -> Result<Bytes, AsnEncodeError> []
+    todo("asn1pkix.ecdsa_signature_der")
+
+// ── what a caller checks, and what it does not ──────────────────────
+
+// Whether the algorithm inside the TBSCertificate equals the one
+// beside the signature.
+//
+// RFC 5280 requires them to be equal, and a certificate where they are
+// not is one to refuse: the outer one is what a verifier would pick and
+// the inner one is what is signed, so a mismatch is a substitution
+// nobody would notice.
+pub fn algorithms_agree(c: AsnCertificate) -> Bool []
+    todo("asn1pkix.algorithms_agree")
+
+// Whether `at` falls inside the certificate's validity period,
+// inclusive at both ends.
+//
+// The time arrives as a parameter because a `core` package has no
+// clock, and a test that pins an expiry needs to choose the moment
+// anyway.
+pub fn is_valid_at(c: AsnCertificate, at: CivilDateTime) -> Bool []
+    todo("asn1pkix.is_valid_at")
+
+// A distinguished name as RFC 4514 text: `CN=example.com,O=Acme,C=GB`,
+// outermost last.
+//
+// For a log line and for a person.  NOT for comparison — two names that
+// print the same can have different encodings, and a chain check
+// compares `AsnName.span` rather than this.
+//
+// ```novo
+// use asn1oid
+// use asn1pkix
+// use asn1read
+//
+// fn main() [io]
+//     let cn = AsnAttribute { oid: asn1oid.oid_common_name(), value: "example.com" }
+//     let n = AsnName { rdns: [AsnRdn { attributes: [cn] }],
+//         span: AsnSpan { off: 0, len: 0 } }
+//     println(asn1pkix.name_text(n))   // CN=example.com
+// ```
+pub fn name_text(n: AsnName) -> Str []
+    todo("asn1pkix.name_text")
+
+// The first value of the attribute with this OID, or `None`.
+//
+// `common_name` is `attribute_value(n, asn1oid.oid_common_name())`, and
+// it is not its own function because reaching for a common name is
+// usually the mistake `subject_alt_dns_names` exists to prevent.
+pub fn attribute_value(n: AsnName, o: AsnOid) -> ?Str []
+    todo("asn1pkix.attribute_value")
+
+// Whether two names have the same encoding.
+//
+// What a chain check compares: an issuer name matches a subject name
+// when the BYTES match, and RFC 5280's full name-matching rules —
+// case folding, whitespace collapse, string-type equivalence — are a
+// specification of their own that this package does not implement and
+// says so.
+pub fn names_encode_equal(src_a: Bytes, a: AsnName, src_b: Bytes, b: AsnName) -> Bool []
+    todo("asn1pkix.names_encode_equal")
+
+// ── writing ─────────────────────────────────────────────────────────
+
+// A SubjectPublicKeyInfo, encoded.
+//
+// What a program writes when it has generated a key and wants a
+// `.pem` file somebody else can read.
+pub fn write_spki(k: AsnSubjectPublicKeyInfo) -> Result<Bytes, AsnEncodeError> []
+    todo("asn1pkix.write_spki")
+
+// A PKCS#8 PrivateKeyInfo, encoded.
+pub fn write_pkcs8(k: AsnPrivateKeyInfo) -> Result<Bytes, AsnEncodeError> []
+    todo("asn1pkix.write_pkcs8")
+
+// A SubjectPublicKeyInfo holding an EC public key from its `x` and `y`.
+//
+// The convenience that closes the loop with p256-nv: that package
+// answers `x` and `y`, and this turns them into the bytes a file
+// holds.
+pub fn ec_spki(curve: AsnOid, x: Bytes,
+               y: Bytes) -> Result<AsnSubjectPublicKeyInfo, AsnEncodeError> []
+    todo("asn1pkix.ec_spki")
+
+// A SubjectPublicKeyInfo holding an Ed25519 public key from its
+// thirty-two bytes.
+//
+// With the `parameters` ABSENT, which is RFC 8410's rule and the one a
+// hand-written encoder gets wrong.
+pub fn ed25519_spki(key: Bytes) -> Result<AsnSubjectPublicKeyInfo, AsnEncodeError> []
+    todo("asn1pkix.ed25519_spki")

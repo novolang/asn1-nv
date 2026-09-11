@@ -1,0 +1,156 @@
+// tests/embedded_probe.nv — the package's device claim, as a program
+// that either builds for a Cortex-M or does not.
+//
+// The shard audit's `core-embedded` row copies this and the modules its
+// `use` lines reach into a package of its own and runs
+//
+//   novo build --target=nrf52-qemu src/probe.nv
+//
+// which produces a real Cortex-M4 ELF or fails.  The consumer that
+// makes the claim worth having is a device that was PROVISIONED with a
+// public key and is handed a certificate: to decide whether to trust
+// what it was sent it has to walk into the TBSCertificate, into the
+// SubjectPublicKeyInfo, into the AlgorithmIdentifier, compare one
+// OBJECT IDENTIFIER and take the key bytes.  Every step of that is
+// header arithmetic and arc comparison, and none of it needs a heap.
+//
+// It BUILDS; it does not run.  Every function it calls is a `todo()`
+// today, so a device that executed this would panic on the first line
+// of `main`.  What is being checked is the tier: `--target=nrf52-qemu`
+// stamps `@tier(embedded)` on every function it compiles, so the
+// checker walks the module and refuses a `Str` concatenation, a list
+// literal or an unbounded `while` wherever the implementation later
+// puts one.
+//
+// `asn1read`, `asn1univ`, `asn1oid`, `asn1write` AND `asn1pkix` ARE NOT
+// USED HERE, and that is the split rather than a convenience: they
+// speak `Str`, `Bytes` and `Cursor`, the embedded runtime defines none
+// of them, and one host-only function anywhere in a compilation unit is
+// an undefined symbol at embedded link time whether or not the firmware
+// calls it.
+
+use asn1tag
+
+// The first seven content bytes of `1.2.840.10045.2.1`, the way
+// firmware holds an OID it was compiled with.
+//
+// The array is a FIELD of a `@value` struct rather than a return type,
+// because `[u8; 7]` is a true inline array only inside one — outside,
+// the annotation still means a list, and a list literal is an implicit
+// heap allocation the tier refuses (SPEC § 14.4).
+@value
+struct ProbeOid
+    b: [u8; 7]
+
+// `2a 86 48 ce 3d 02 01` — `id-ecPublicKey`, which is the algorithm of
+// every certificate this kind of device is provisioned to check.
+fn probe_oid() -> ProbeOid
+    ProbeOid { b: [0x2a as u8, 0x86 as u8, 0x48 as u8, 0xce as u8,
+                   0x3d as u8, 0x02 as u8, 0x01 as u8] }
+
+// The opening bytes of a certificate, the way they arrive on a wire.
+@value
+struct ProbeDer
+    b: [u8; 8]
+
+// `30 82 01 f4 30 82 01 9a` — a SEQUENCE of 500 bytes holding a
+// SEQUENCE of 410, which is what the first eight bytes of a small
+// certificate look like.
+fn probe_der() -> ProbeDer
+    ProbeDer { b: [0x30 as u8, 0x82 as u8, 0x01 as u8, 0xf4 as u8,
+                   0x30 as u8, 0x82 as u8, 0x01 as u8, 0x9a as u8] }
+
+fn main() [hw]
+    // The constants, so a device that sizes a scratch buffer compiles
+    // the same numbers the host does.
+    //
+    // Each step is bound with its type written out because a call into
+    // another module does not have its return type inferred in a
+    // single-file build.  Inside a package built as one unit — which is
+    // what every host suite does — none of these annotations is needed.
+    let universal: Int = asn1tag.class_universal()
+    let context: Int = asn1tag.class_context()
+    let seq_tag: Int = asn1tag.tag_sequence()
+    let int_tag: Int = asn1tag.tag_integer()
+    let oid_tag: Int = asn1tag.tag_oid()
+    let bits_tag: Int = asn1tag.tag_bit_string()
+    let cbit: Int = asn1tag.constructed_bit()
+    let indef: Int = asn1tag.indefinite_byte()
+    let eoc: Int = asn1tag.end_of_contents_len()
+
+    // The identifier octet a device compares against, built rather than
+    // spelled: `0x30` for a SEQUENCE.
+    let seq_id: Int = asn1tag.identifier_byte(universal, true, seq_tag)
+    let ctx0: Int = asn1tag.identifier_byte(context, true, 0)
+
+    // Walk the two headers at the front of a certificate, byte at a
+    // time, which is what a device reading from a UART does.
+    let der = probe_der()
+    var h: AsnHeadScan = asn1tag.head_scan()
+    for i in 0..4
+        let b: u8 = der.b[i]
+        h = asn1tag.head_push(h, b)
+        // A real device would be filling a display or a hash here; the
+        // write is what forces the loop to be compiled.
+        hal.uart.write(".")
+
+    let outer_len: Int = h.len
+    let outer_tag: Int = h.tag
+    let outer_class: Int = asn1tag.class_of(h.id)
+    let outer_constructed: Bool = asn1tag.is_constructed(h.id)
+    let outer_high: Bool = asn1tag.is_high_tag(h.id)
+    let outer_low: Int = asn1tag.tag_of_low(h.id)
+
+    var inner: AsnHeadScan = asn1tag.head_scan()
+    for i in 4..8
+        let b: u8 = der.b[i]
+        inner = asn1tag.head_push(inner, b)
+        hal.uart.write("-")
+
+    let need: Int = asn1tag.head_need(inner)
+
+    // Compare the algorithm OID, arc by arc, in registers and with no
+    // buffer — which is the whole of what the claim is for.
+    let oid = probe_oid()
+    var arcs_seen: Int = 0
+    var first: Int = 0
+    var second: Int = 0
+    for i in 0..7
+        var a: AsnArcScan = asn1tag.arc_scan()
+        let b: u8 = oid.b[i]
+        a = asn1tag.arc_push(a, b)
+        if a.done
+            if arcs_seen == 0
+                first = asn1tag.first_arc(a.acc)
+                second = asn1tag.second_arc(a.acc)
+            arcs_seen = arcs_seen + 1
+            hal.uart.write("=")
+
+    let packed: Int = asn1tag.pack_arcs(first, second)
+    let alen: Int = asn1tag.arc_len(packed)
+
+    // The write direction: a device that answers a challenge signs
+    // something, and signing something means writing a header in front
+    // of it.
+    let idt: AsnEmit = asn1tag.emit_identifier(universal, false, int_tag)
+    let lent: AsnEmit = asn1tag.emit_length(200)
+    let arce: AsnEmit = asn1tag.emit_arc(840)
+    for i in 0..lent.len
+        let b: u8 = lent.out[i]
+        hal.uart.write("+")
+
+    let hdr: Int = asn1tag.header_len(seq_tag, outer_len)
+    let llen: Int = asn1tag.length_len(outer_len)
+    let ilen: Int = asn1tag.identifier_len(oid_tag)
+
+    if outer_constructed and not outer_high and outer_low == seq_tag
+        if idt.ok and lent.ok and arce.ok and h.done
+            hal.uart.write("!")
+
+    let total: Int = seq_id + ctx0 + cbit + indef + eoc + bits_tag
+        + outer_tag + outer_class + need + arcs_seen + alen + hdr
+        + llen + ilen + inner.len
+    if total > 0
+        hal.uart.write("?")
+
+    hal.uart.write("asn1-nv: tag, length, value\n")

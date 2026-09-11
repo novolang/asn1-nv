@@ -1,0 +1,354 @@
+// asn1read — tag, length, value, read out of bytes the caller already
+// holds.
+//
+// Every body is a `todo()`.  The signatures are the design, and the
+// compiler checks them as claims; see the README for the stamp.
+//
+// TWO SURFACES, BECAUSE THERE ARE TWO WAYS TO MEET A DER DOCUMENT.
+//
+// BY OFFSET, which is how a certificate is read.  A document is
+// nested, it is in memory whole, and what a parser wants is "the
+// header at this offset", "the span this value's content occupies",
+// "the children of this SEQUENCE".  Nothing is copied, and every span
+// points into the caller's own bytes — which matters more here than
+// anywhere else in the grid, because a signature is computed over a
+// SPAN of the original document and a parser that copied would make
+// the caller re-derive it.
+//
+// BY FEEDING, which is how a large document arrives.  A certificate
+// chain over a socket, a CRL of a hundred megabytes.  `feed` takes
+// chunks and drains events, and the payload of a primitive value is
+// handed over whole because the values in PKIX are small.
+//
+// THE DEPTH BOUND IS NOT OPTIONAL.  ASN.1's nesting is unbounded by
+// specification and a thirty-byte input can ask for a thousand levels
+// of SEQUENCE.  Every implementation bounds it; this one says where the
+// number is instead of hiding it.
+//
+// DER, AND BER WHERE THE REFERENCE IS TOLERANT.  DER is the default and
+// the refusals name the rules by their own names —
+// `AsnNonMinimalLength`, `AsnIndefiniteLength`, `AsnBadBoolean`,
+// `AsnNonMinimalInteger`, `AsnSetOfNotSorted`.  `ber_tolerant` accepts
+// the five, because a program reading what is already deployed meets
+// them and refusing would leave a caller with nothing but the bytes.
+// It is a FLAG AND NOT A DEFAULT, because a signature is computed over
+// bytes and two encodings of one value is how a signature checks out
+// over something the reader did not read.
+
+use std.bytes
+
+// A class, a construction and a number: everything an identifier
+// carries.
+//
+// A plain struct rather than a `@value` one because it is a `Result`
+// payload throughout, and a `@value` struct cannot be one (E2015).
+// `asn1tag` is where the integer-only form lives.
+pub struct AsnTag
+    class: AsnClass
+    constructed: Bool
+    number: Int
+
+// Which of the four classes a tag belongs to.
+pub enum AsnClass
+    // The types the standard defines: INTEGER, SEQUENCE, OBJECT
+    // IDENTIFIER.
+    AsnUniversal
+    // A type a standard built on ASN.1 defines for itself.
+    AsnApplication
+    // A tag whose meaning comes from where it sits: `[0]` for a
+    // certificate's version, `[3]` for its extensions.  What PKIX uses
+    // everywhere.
+    AsnContext
+    // Class 3, and effectively unused.
+    AsnPrivate
+
+// A range of the caller's bytes: where a value's content starts and how
+// long it is.
+//
+// The type the whole by-offset surface is built on.  Nothing is
+// copied, and a span handed back can be sliced, hashed or signed over
+// without the caller re-deriving it.
+pub struct AsnSpan
+    off: Int
+    len: Int
+
+// One value's header, read.
+pub struct AsnHeader
+    tag: AsnTag
+    // The content's length in bytes.  -1 when `indefinite` is set,
+    // because the length is not knowable until the end-of-contents
+    // marker is found.
+    length: Int
+    // Whether the length was the BER indefinite form, `0x80`.  Always
+    // false under DER, where it is `AsnIndefiniteLength`.
+    indefinite: Bool
+    // How many bytes the identifier and length octets occupied, so the
+    // content starts at the header's offset plus this.
+    header_len: Int
+
+// What a reader will not do, whatever it is asked.
+pub struct AsnLimits
+    // How deep constructed values may nest.  64 by default, which is
+    // more than any real PKIX structure and less than a document
+    // designed to exhaust a stack.
+    max_depth: Int
+    // The most bytes one value's content may occupy.  A length is an
+    // allocation instruction from whoever wrote the file.
+    max_length: Int
+    // Whether the five rules BER allows and DER does not are accepted:
+    // a non-minimal length, an indefinite length, a boolean that is not
+    // `0xff`, a non-minimal integer, an unsorted SET OF.
+    //
+    // False by default, and the README says why it is a flag rather
+    // than a default.
+    ber_tolerant: Bool
+
+// The limits a program reading certificates should start from: depth
+// 64, a 16 MiB value, DER strictly.
+//
+// ```novo
+// use asn1read
+//
+// fn main() [io]
+//     println("${asn1read.default_limits().ber_tolerant}")   // false
+// ```
+pub fn default_limits() -> AsnLimits []
+    todo("asn1read.default_limits")
+
+// The same bounds with the five BER rules accepted.
+//
+// What a program reading a file somebody else's tool wrote uses, when
+// no signature is being checked over the bytes.
+pub fn ber_limits() -> AsnLimits []
+    todo("asn1read.ber_limits")
+
+// ── by offset ───────────────────────────────────────────────────────
+
+// The header at `off`.
+//
+// An offset outside the buffer is `AsnTruncated` rather than a panic:
+// an offset derived from bytes that arrived is input, and input is
+// never a reason to crash.
+//
+// ```novo
+// use std.bytes
+// use asn1read
+//
+// fn main() [io]
+//     // `30 03 02 01 07` — a SEQUENCE holding the INTEGER 7.
+//     let der = bytes.from_hex("3003020107") ?? bytes.zeros(0)
+//     match asn1read.header_at(der, 0, asn1read.default_limits())
+//         Ok(h)  => println("${h.tag.number} ${h.length} ${h.header_len}")
+//         Err(e) => println(e.message())
+//     // 16 3 2
+// ```
+pub fn header_at(src: Bytes, off: Int, limits: AsnLimits) -> Result<AsnHeader, AsnDecodeError> []
+    todo("asn1read.header_at")
+
+// The span the value at `off` occupies, header included.
+//
+// What a caller adds to `off` to reach the next sibling.
+pub fn value_span_at(src: Bytes, off: Int, limits: AsnLimits) -> Result<AsnSpan, AsnDecodeError> []
+    todo("asn1read.value_span_at")
+
+// The span the CONTENT of the value at `off` occupies, header
+// excluded.
+//
+// The one a caller wants nine times out of ten: the bytes of the
+// INTEGER, the bytes inside the SEQUENCE.
+pub fn content_span_at(src: Bytes, off: Int,
+                       limits: AsnLimits) -> Result<AsnSpan, AsnDecodeError> []
+    todo("asn1read.content_span_at")
+
+// The offset of the value after the one at `off`.
+//
+// `off` plus the whole value's length, which is what walking a
+// SEQUENCE's children by hand looks like.
+pub fn next_offset(src: Bytes, off: Int, limits: AsnLimits) -> Result<Int, AsnDecodeError> []
+    todo("asn1read.next_offset")
+
+// Every child of the constructed value at `off`, as whole-value spans.
+//
+// `AsnWrongConstruction` when the value is primitive.  The spans are in
+// document order, which for a SEQUENCE is the order the standard
+// declared and for a SET is whatever the writer chose.
+//
+// ```novo
+// use std.bytes
+// use asn1read
+//
+// fn main() [io]
+//     let der = bytes.from_hex("3006020107020108") ?? bytes.zeros(0)
+//     match asn1read.children_at(der, 0, asn1read.default_limits())
+//         Ok(kids) => println("${kids.len()}")   // 2
+//         Err(e)   => println(e.message())
+// ```
+pub fn children_at(src: Bytes, off: Int, limits: AsnLimits) -> Result<[AsnSpan], AsnDecodeError> []
+    todo("asn1read.children_at")
+
+// The content span of the value at `off`, refusing anything but this
+// universal tag.
+//
+// The workhorse of every structure parser in `asn1pkix`: "the INTEGER
+// here", "the SEQUENCE here".  `AsnUnexpectedTag` names both numbers,
+// so a person reading the refusal can find the field in the standard's
+// own ASN.1 module.
+pub fn expect_at(src: Bytes, off: Int, tag: Int,
+                 limits: AsnLimits) -> Result<AsnSpan, AsnDecodeError> []
+    todo("asn1read.expect_at")
+
+// The content span of a context-specific tag `[n]`, refusing anything
+// else.
+//
+// PKIX's optional fields are context tags, so this is what reads a
+// certificate's `[0] version` and `[3] extensions`.
+pub fn expect_context_at(src: Bytes, off: Int, number: Int,
+                         limits: AsnLimits) -> Result<AsnSpan, AsnDecodeError> []
+    todo("asn1read.expect_context_at")
+
+// The content span of an EXPLICIT context tag `[n]`: the tag's content
+// is one whole value, and this answers THAT value's content.
+//
+// Explicit and implicit tagging is the distinction that costs an
+// afternoon.  An EXPLICIT `[0] INTEGER` is a `[0]` wrapping an INTEGER
+// — two headers.  An IMPLICIT `[0] INTEGER` is an INTEGER whose
+// identifier octet was replaced — one header.  The module the type came
+// from decides which, and a parser that guessed would read one as the
+// other and find a plausible wrong number.
+pub fn explicit_at(src: Bytes, off: Int, number: Int,
+                   limits: AsnLimits) -> Result<AsnSpan, AsnDecodeError> []
+    todo("asn1read.explicit_at")
+
+// The content span of an IMPLICIT context tag `[n]`: the content is the
+// value's own, with the identifier replaced.
+//
+// The same answer as `expect_context_at`, under the name that says
+// which tagging environment the caller is in.  Both are here because a
+// reader of the calling code should be able to see which was meant.
+pub fn implicit_at(src: Bytes, off: Int, number: Int,
+                   limits: AsnLimits) -> Result<AsnSpan, AsnDecodeError> []
+    todo("asn1read.implicit_at")
+
+// Whether the value at `off` carries this universal tag, without
+// refusing when it does not.
+//
+// What an OPTIONAL field is read with: look, and move on if it is not
+// there.
+pub fn peek_tag_at(src: Bytes, off: Int, limits: AsnLimits) -> Result<AsnTag, AsnDecodeError> []
+    todo("asn1read.peek_tag_at")
+
+// Read one whole value and answer how many bytes it took, refusing
+// trailing bytes.
+//
+// What a caller handed a file calls: a DER document is exactly one
+// value, and bytes after it are `AsnTrailingBytes` rather than a
+// second document.
+pub fn read_document(src: Bytes, limits: AsnLimits) -> Result<AsnSpan, AsnDecodeError> []
+    todo("asn1read.read_document")
+
+// The bytes a span names, copied out.
+//
+// The one function here that allocates, and it is named so that a
+// caller can see where the copy happens.  Everything else answers
+// spans.
+pub fn span_bytes(src: Bytes, s: AsnSpan) -> Bytes []
+    todo("asn1read.span_bytes")
+
+// ── by feeding ──────────────────────────────────────────────────────
+
+// What the reader drained.
+//
+// A primitive value arrives whole, with its content; a constructed one
+// is bracketed, so a caller sees the nesting rather than a flat run it
+// has to match up itself.
+pub enum AsnEvent
+    // A primitive value: its tag, where it started, and its content.
+    AsnPrimitiveValue(tag: AsnTag, at: Int, content: Bytes)
+    // A constructed value opened.  `length` is -1 for the BER
+    // indefinite form.
+    AsnConstructedStart(tag: AsnTag, at: Int, length: Int)
+    // A constructed value closed.
+    AsnConstructedEnd(tag: AsnTag, at: Int)
+
+// One turn of the reader.
+//
+// `need` is a HINT and never a promise: a header has no announced
+// length until its own length octets have arrived, so the answer is 1
+// whenever the reader is inside one.  It is 0 when the reader is
+// between values at depth zero.
+pub struct AsnStep
+    reader: AsnReader
+    events: [AsnEvent]
+    need: Int
+
+// A document being read.
+//
+// Opaque on purpose.  Everything a caller needs is an accessor below,
+// and a field a caller reaches into is a field this package can never
+// change.
+pub struct AsnReader
+    limits: AsnLimits
+    pending: Bytes
+    offset: Int
+    depth: Int
+    open: [Int]
+
+// A fresh reader over one document.
+pub fn reader(limits: AsnLimits) -> AsnReader []
+    todo("asn1read.reader")
+
+// Feed a chunk and take every value that finished.
+//
+// A value split across chunks stays pending until the rest arrives; a
+// chunk that finishes nothing is an empty event list and not an error.
+pub fn feed(r: AsnReader, chunk: [u8]) -> Result<AsnStep, AsnDecodeError> []
+    todo("asn1read.feed")
+
+// Say that the document ends here.
+//
+// Bytes still pending are `AsnTruncated`; a constructed value still
+// open is too.  A document that ends cleanly answers a step with `need`
+// 0.
+pub fn finish(r: AsnReader) -> Result<AsnStep, AsnDecodeError> []
+    todo("asn1read.finish")
+
+// How many bytes the reader has consumed since it was made.
+//
+// The number every `AsnDecodeError`'s `at` is counted in.
+pub fn offset(r: AsnReader) -> Int []
+    todo("asn1read.offset")
+
+// How many fed bytes are waiting for the rest of their value.
+pub fn pending_len(r: AsnReader) -> Int []
+    todo("asn1read.pending_len")
+
+// How many constructed values are open.
+pub fn depth(r: AsnReader) -> Int []
+    todo("asn1read.depth")
+
+// Whether the reader is between values at depth zero, and so would
+// accept `finish` without refusing.
+pub fn at_boundary(r: AsnReader) -> Bool []
+    todo("asn1read.at_boundary")
+
+// Every value in a buffer the caller already holds entirely, as events.
+//
+// The convenience over `feed` and `finish` for a document that arrived
+// in one piece, and what a tool that dumps a certificate's structure
+// calls.
+pub fn walk(src: Bytes, limits: AsnLimits) -> Result<[AsnEvent], AsnDecodeError> []
+    todo("asn1read.walk")
+
+// ── the bound effect parameter ──────────────────────────────────────
+
+// Read one whole document from the caller's source.
+//
+// The pump written once inside the package, charged whatever the
+// caller's source costs: `[io]` for a file, nothing for a buffer
+// (`docs/publishing.md` § How a `core` package takes bytes from its
+// host).  `limit` is the most bytes to read before refusing.
+//
+// It does not replace `feed` and `finish`: a caller that cannot give up
+// control of its own loop still needs the state machine.
+pub fn drain<S: Read[e]>(r: AsnReader, src: S, limit: Int) -> Result<AsnStep, AsnDecodeError> [e]
+    todo("asn1read.drain")

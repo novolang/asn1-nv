@@ -107,6 +107,7 @@ satisfy.
 | `asn1oid` | Object identifiers as values: arcs in and out, text in and out, comparison and prefix tests, and seventeen identifiers named. |
 | `asn1write` | Writing DER into a buffer the caller owns: the size of each form, the fifteen writers, and a builder that closes a constructed value when you end it. |
 | `asn1pkix` | The structures: SubjectPublicKeyInfo, PKCS#8, an X.509 certificate, distinguished names, four extensions by name, and the key and signature forms the cryptography packages take. |
+| `asn1err` | The refusals a read or a write answers with, each carrying the offset it was found at, and the question of whether one is a DER-only rule. |
 
 ## How to choose an entry point
 

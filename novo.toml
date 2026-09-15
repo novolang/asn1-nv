@@ -1,6 +1,6 @@
 [package]
 name        = "asn1-nv"
-version     = "0.0.1"
+version     = "0.0.2"
 description = "DER, and enough BER to read what is already deployed: tag-length-value as a feed-and-drain reader with a depth bound, a writer into a caller's buffer, the universal types with OBJECT IDENTIFIER arc arithmetic and times over calendar-nv, and one application module — the PKIX structures the crypto tier parses keys and certificates out of.  No signature verification.  Interface only — every body is a todo()."
 license     = "Apache-2.0"
 

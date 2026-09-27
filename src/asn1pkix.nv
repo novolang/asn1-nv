@@ -21,7 +21,6 @@
 
 use std.bytes
 use std.str
-use asn1tag
 use asn1read
 use asn1oid
 use asn1univ
@@ -626,9 +625,7 @@ fn read_extensions(src: Bytes, off: Int,
 // positive; its leading zero goes, and zeros are put back in front.
 fn padded(sig: Bytes, off: Int, width: Int, limits: AsnLimits) -> Result<Bytes, AsnDecodeError> []
     let raw = asn1univ.integer_bytes_at(sig, off, limits)!
-    var start = 0
-    while start < bytes.len(raw) - 1 and (bytes.byte_at(raw, start) ?? 0) == 0
-        start = start + 1
+    let start = leading_zeros(raw, 1)
     let n = bytes.len(raw) - start
     if n > width
         return Err(AsnIntegerTooLarge(off, bytes.len(raw)))
@@ -637,9 +634,7 @@ fn padded(sig: Bytes, off: Int, width: Int, limits: AsnLimits) -> Result<Bytes, 
 // Big-endian unsigned bytes as the content of a positive INTEGER: the
 // leading zeros go, and one comes back when the top bit is set.
 fn positive(v: Bytes) -> Bytes []
-    var start = 0
-    while start < bytes.len(v) and (bytes.byte_at(v, start) ?? 0) == 0
-        start = start + 1
+    let start = leading_zeros(v, 0)
     let rest = bytes.slice(v, start, bytes.len(v))
     if bytes.len(rest) == 0 or (bytes.byte_at(rest, 0) ?? 0) >= 128
         return bytes.concat([bytes.zeros(1), rest])
@@ -653,6 +648,14 @@ fn same_parameters(a: ?Bytes, b: ?Bytes) -> Bool []
             return bytes.to_hex(x) == bytes.to_hex(y)
         return false
     b == None
+
+// How many zero bytes `b` starts with, leaving at least `keep` bytes.
+fn leading_zeros(b: Bytes, keep: Int) -> Int []
+    var n = 0
+    for i in 0..bytes.len(b) - keep
+        if n == i and (bytes.byte_at(b, i) ?? 1) == 0
+            n = i + 1
+    n
 
 // An AlgorithmIdentifier, with its parameters when there are any.
 fn put_algorithm(b: AsnBuilder, a: AsnAlgorithmId) -> Result<AsnBuilder, AsnEncodeError> []

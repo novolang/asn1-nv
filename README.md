@@ -263,7 +263,7 @@ at link time on a device, whether or not the firmware calls it.
 ```bash
 novo test tests/asn1_tests.nv        # 93 tests: X.690 and the RFC samples
 novo test tests/openssl_tests.nv     #  9 tests: certificates and keys OpenSSL made
-novo test tests/edges_tests.nv       # 31 tests: each refusal, BER, feeding a byte at a time
+novo test tests/edges_tests.nv       # 32 tests: each refusal, BER, feeding a byte at a time
 bash tests/coverage.sh               # line coverage over src/, merged across the suites
 bash tests/alloc_scan.sh             # nothing in asn1tag allocates
 ```

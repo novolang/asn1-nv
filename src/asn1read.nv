@@ -187,7 +187,9 @@ pub fn children_at(src: Bytes, off: Int, limits: AsnLimits) -> Result<[AsnSpan],
     let end = off + whole - (if h.indefinite then 2 else 0)
     var kids: [AsnSpan] = []
     var p = off + h.header_len
-    while p < end
+    loop
+        if p >= end
+            break
         let n = value_len(src, p, limits, 1)!
         if p + n > end
             return Err(AsnLengthOverrun(p, n, end - p))
@@ -527,7 +529,9 @@ fn check_tree(src: Bytes, off: Int, limits: AsnLimits, depth: Int) -> Result<Int
         return Err(AsnDepthExceeded(off, limits.max_depth))
     let end = off + whole - (if h.indefinite then 2 else 0)
     var p = off + h.header_len
-    while p < end
+    loop
+        if p >= end
+            break
         let n = check_tree(src, p, limits, depth + 1)!
         if p + n > end
             return Err(AsnLengthOverrun(p, n, end - p))

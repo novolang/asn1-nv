@@ -28,7 +28,6 @@ use asn1tag
 use asn1read
 use asn1univ
 use asn1oid
-use civil
 
 // ── how long it will be ─────────────────────────────────────────────
 
@@ -559,7 +558,9 @@ fn content_of(value: Bytes) -> Result<Bytes, AsnEncodeError> []
 fn members(content: Bytes) -> [Bytes] []
     var out: [Bytes] = []
     var p = 0
-    while p < bytes.len(content)
+    loop
+        if p >= bytes.len(content)
+            break
         // Bytes added with `put_encoded` that are not a value stay
         // together as the last member.
         var n = bytes.len(content) - p

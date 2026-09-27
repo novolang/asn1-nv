@@ -242,7 +242,6 @@ pub fn utc_time_at(src: Bytes, off: Int,
 // when it would be zero; anything else is `AsnBadTime`.  Digits past
 // the ninth are dropped, because the time holds nanoseconds.  What a
 // certificate valid past 2049 must use.
-
 pub fn generalized_time_at(src: Bytes, off: Int,
                            limits: AsnLimits) -> Result<CivilDateTime, AsnDecodeError> []
     let c = asn1read.expect_at(src, off, 24, limits)!
@@ -388,7 +387,9 @@ fn printable(b: Int) -> Bool []
 fn check_utf8(src: Bytes, c: AsnSpan) -> Result<Unit, AsnDecodeError> []
     var i = c.off
     let end = c.off + c.len
-    while i < end
+    loop
+        if i >= end
+            break
         let b = byte(src, i)
         let n = utf8_width(b)
         if n == 0 or i + n > end

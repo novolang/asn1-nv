@@ -1,30 +1,22 @@
 // asn1err — every way a DER document can refuse to be read or written.
 //
-// Every body is a `todo()`.  The signatures are the design, and the
-// compiler checks them as claims; see the README for the stamp.
+// There are two error types, because there are two causes.
+// `AsnDecodeError` says that bytes are not the structure they were read
+// as.  A network peer or a file can cause it, so every variant carries
+// the byte offset it was found at: a certificate is a hundred nested
+// values, and the question a reader has is which one.
 //
-// TWO TYPES, BECAUSE THERE ARE TWO AUDIENCES
+// `AsnEncodeError` says that a caller asked for something DER does not
+// allow: an OID with one arc, a PrintableString holding an `@`, a value
+// that does not fit the caller's buffer.  Nothing arrived, so it has no
+// offset.
 //
-// `AsnDecodeError` is "these bytes are not that structure".  It is the
-// only one a network peer or a file can cause, so every variant carries
-// a byte offset: a certificate is a hundred nested values and the
-// question a person has is always which one.
-//
-// `AsnEncodeError` is "you asked me to write something DER does not
-// allow" — an OID with one arc, a PrintableString holding an `@`, a
-// length that does not fit the caller's buffer.  That is the calling
-// program's fault, it has no offset into anything that arrived, and a
-// caller matching one enum for both would be writing arms it can never
-// reach.
-//
-// WHY THE DER REFUSALS ARE THEIR OWN VARIANTS.  A non-minimal length, a
-// leading zero on a positive INTEGER, an indefinite length, an unsorted
-// SET OF — every one of them is a second valid encoding of a value that
-// already has one, and a signature is computed over BYTES.  Two
-// encodings of one value is how a signature checks out over something
-// the reader did not read.  So they are named rather than folded into
-// a general "malformed", and `AsnLimits.ber_tolerant` is the one switch
-// that turns the readable ones into acceptance.
+// The five rules DER adds to BER each have a variant of their own:
+// `AsnNonMinimalLength`, `AsnIndefiniteLength`, `AsnBadBoolean`,
+// `AsnNonMinimalInteger` and `AsnSetOfNotSorted`.  Each refuses a second
+// encoding of a value that already has one, and a signature is computed
+// over bytes.  `AsnLimits.ber_tolerant` is the one switch that accepts
+// them, and `is_der_only` says whether a refusal is one of the five.
 
 // AsnDecodeError is why a byte string is not the structure it was read
 // as.
@@ -132,13 +124,94 @@ impl Error for AsnDecodeError
     //     // asn1: indefinite length at byte 1 — DER requires a definite length
     // ```
     fn message(self) -> Str
-        todo("asn1err.AsnDecodeError.message")
+        match self
+            AsnTruncated(at, need)              =>
+                "asn1: the input ends at byte ${at} with ${need} more byte(s) needed"
+            AsnLengthOverrun(at, len, left)     =>
+                "asn1: a length of ${len} at byte ${at} runs past the ${left} byte(s) left"
+            AsnReservedLengthForm(at)           =>
+                "asn1: the reserved length byte 0xff at byte ${at}"
+            AsnLengthNotRepresentable(at)       =>
+                "asn1: a length at byte ${at} too large for an integer"
+            AsnNonMinimalLength(at)             =>
+                "asn1: a length at byte ${at} not in its shortest form — DER requires the shortest"
+            AsnIndefiniteLength(at)             =>
+                "asn1: indefinite length at byte ${at} — DER requires a definite length"
+            AsnStrayEndOfContents(at)           =>
+                "asn1: an end-of-contents marker at byte ${at} with no indefinite length open"
+            AsnBadTagNumber(at)                 =>
+                "asn1: a tag number at byte ${at} that is padded, too large or in the wrong form"
+            AsnDepthExceeded(at, limit)         =>
+                "asn1: nesting deeper than ${limit} at byte ${at}"
+            AsnUnexpectedTag(at, want, got)     =>
+                "asn1: expected tag ${want} at byte ${at} and found tag ${got}"
+            AsnWrongConstruction(at, c)         =>
+                if c
+                    "asn1: a constructed value at byte ${at} where a primitive one is required"
+                else
+                    "asn1: a primitive value at byte ${at} where a constructed one is required"
+            AsnBadBoolean(at, byte)             =>
+                if byte < 0
+                    "asn1: a BOOLEAN at byte ${at} whose content is not one byte"
+                else
+                    "asn1: a BOOLEAN byte ${byte} at byte ${at} — DER admits only 0x00 and 0xff"
+            AsnNonMinimalInteger(at)            =>
+                "asn1: an INTEGER at byte ${at} with a redundant leading byte — DER requires the shortest"
+            AsnIntegerTooLarge(at, len)         =>
+                "asn1: an INTEGER of ${len} bytes at byte ${at} does not fit an Int"
+            AsnBadBitString(at, unused)         =>
+                "asn1: a BIT STRING at byte ${at} with ${unused} unused bit(s)"
+            AsnNullWithContent(at, len)         =>
+                "asn1: a NULL at byte ${at} with ${len} byte(s) of content"
+            AsnBadOid(at)                       =>
+                "asn1: an OBJECT IDENTIFIER that is empty, padded or unfinished at byte ${at}"
+            AsnBadStringBytes(at, byte)         =>
+                "asn1: byte ${byte} at byte ${at} is not allowed in its string type"
+            AsnBadTime(at, text)                =>
+                "asn1: the time `${text}` at byte ${at} is not a valid UTCTime or GeneralizedTime"
+            AsnTimeNotUtc(at)                   =>
+                "asn1: a time at byte ${at} without a Z — DER requires UTC"
+            AsnSetOfNotSorted(at)               =>
+                "asn1: a SET OF element at byte ${at} out of order — DER sorts by encoding"
+            AsnDocumentTooLarge(at, len, limit) =>
+                "asn1: a value of ${len} bytes at byte ${at} is over the limit of ${limit}"
+            AsnTrailingBytes(at, left)          =>
+                "asn1: ${left} byte(s) after the value, from byte ${at}"
+            AsnMissingField(at, what)           =>
+                "asn1: the field ${what} is missing at byte ${at}"
+            AsnUnsupportedVersion(at, version)  =>
+                "asn1: version ${version} at byte ${at} is not one this package reads"
 
 // The byte a decode refusal stopped at.
 //
 // Every variant has one, so this is total and needs no sentinel.
 pub fn decode_offset(e: AsnDecodeError) -> Int []
-    todo("asn1err.decode_offset")
+    match e
+        AsnTruncated(at, _)           => at
+        AsnLengthOverrun(at, _, _)    => at
+        AsnReservedLengthForm(at)     => at
+        AsnLengthNotRepresentable(at) => at
+        AsnNonMinimalLength(at)       => at
+        AsnIndefiniteLength(at)       => at
+        AsnStrayEndOfContents(at)     => at
+        AsnBadTagNumber(at)           => at
+        AsnDepthExceeded(at, _)       => at
+        AsnUnexpectedTag(at, _, _)    => at
+        AsnWrongConstruction(at, _)   => at
+        AsnBadBoolean(at, _)          => at
+        AsnNonMinimalInteger(at)      => at
+        AsnIntegerTooLarge(at, _)     => at
+        AsnBadBitString(at, _)        => at
+        AsnNullWithContent(at, _)     => at
+        AsnBadOid(at)                 => at
+        AsnBadStringBytes(at, _)      => at
+        AsnBadTime(at, _)             => at
+        AsnTimeNotUtc(at)             => at
+        AsnSetOfNotSorted(at)         => at
+        AsnDocumentTooLarge(at, _, _) => at
+        AsnTrailingBytes(at, _)       => at
+        AsnMissingField(at, _)        => at
+        AsnUnsupportedVersion(at, _)  => at
 
 // Whether this refusal is one `AsnLimits.ber_tolerant` turns into
 // acceptance.
@@ -158,7 +231,13 @@ pub fn decode_offset(e: AsnDecodeError) -> Int []
 //     println("${a} ${b}")   // true false
 // ```
 pub fn is_der_only(e: AsnDecodeError) -> Bool []
-    todo("asn1err.is_der_only")
+    match e
+        AsnNonMinimalLength(_)  => true
+        AsnIndefiniteLength(_)  => true
+        AsnBadBoolean(_, _)     => true
+        AsnNonMinimalInteger(_) => true
+        AsnSetOfNotSorted(_)    => true
+        _                       => false
 
 // AsnEncodeError is why something this package was asked to write
 // would not have been legal DER.
@@ -183,10 +262,35 @@ pub enum AsnEncodeError
     AsnEncodeDepthExceeded(limit: Int)
     // `done` was called with a constructed value still open.
     AsnUnclosedValue(depth: Int)
+    // `end` was called with no constructed value open.
+    AsnNothingOpen
+    // Bytes handed over as one encoded value that are not exactly one
+    // whole tag-length-value.  `len` is how many bytes there were.
+    AsnNotOneValue(len: Int)
 
 // message renders the refusal as one line of prose.
 impl Error for AsnEncodeError
     // Answer the one-line report.  There is no offset: nothing arrived,
     // so there is nothing to point at.
     fn message(self) -> Str
-        todo("asn1err.AsnEncodeError.message")
+        match self
+            AsnBufferTooSmall(need, left) =>
+                "asn1: the value needs ${need} byte(s) and the buffer has ${left}"
+            AsnBadOidArcs(what)           =>
+                "asn1: an OBJECT IDENTIFIER with ${what}"
+            AsnNegativeValue(what)        =>
+                "asn1: a negative ${what}"
+            AsnStringNotAllowed(tag, at)  =>
+                "asn1: the character at byte ${at} is not allowed in a string of tag ${tag}"
+            AsnBadUnusedBits(unused)      =>
+                "asn1: a BIT STRING with ${unused} unused bit(s)"
+            AsnTimeNotWritable(year)      =>
+                "asn1: the year ${year} cannot be written in that time type"
+            AsnEncodeDepthExceeded(limit) =>
+                "asn1: nesting deeper than ${limit}"
+            AsnUnclosedValue(depth)       =>
+                "asn1: ${depth} constructed value(s) still open"
+            AsnNothingOpen                =>
+                "asn1: no constructed value is open"
+            AsnNotOneValue(len)           =>
+                "asn1: ${len} byte(s) that are not one whole tag-length-value"

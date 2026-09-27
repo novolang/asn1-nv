@@ -1,41 +1,34 @@
 // asn1write — DER written into memory the caller already owns.
 //
-// Every body is a `todo()`.  The signatures are the design, and the
-// compiler checks them as claims; see the README for the stamp.
+// A value's length comes before its content, and the length's own width
+// depends on the number it holds: one byte below 128, two up to 255,
+// three up to 65535.  So a writer cannot write a SEQUENCE's `30`, leave
+// a hole and come back to it.  This module offers two ways round that.
 //
-// THE LENGTH COMES BEFORE THE CONTENT, which is the whole problem.  A
-// SEQUENCE is `30`, then its length, then its children — and the
-// length's own width depends on the number it holds: one byte below
-// 128, two up to 255, three up to 65535.  So a writer cannot write
-// `30`, leave a hole and come back; the hole is the wrong size as often
-// as not.
+// - Size first.  Add up the `*_len` functions over the value, then write
+//   it once with the `*_into` functions.  The buffer can be exactly the
+//   right size, and nothing is copied.
+// - Build inside out.  `AsnBuilder` keeps a buffer for each open
+//   constructed value and writes its header when it is closed.  It
+//   takes one pass over the value and one copy per level.
 //
-// Two honest ways out, and this module takes both:
+// Everything here is DER, with no switch: the shortest length, the
+// shortest integer, definite lengths, `0xff` for true, and SET OF
+// elements sorted by their encodings (X.690 section 11.6).
+// `asn1read.ber_limits` exists on the reading side only.
 //
-//   SIZE FIRST.  Walk the value, add up `*_len`, write once.  Two
-//   passes over the value and one over the buffer, no copying, and the
-//   buffer can be exactly the right size.  This is what a generated or
-//   hand-written structure encoder does.
-//
-//   BUILD INSIDE OUT.  Encode each child into a buffer of its own, then
-//   write the header and copy.  One pass over the value, one allocation
-//   per nesting level.  This is `AsnBuilder`, for a caller who would
-//   rather not write the sizing pass.
-//
-// DER AND NOT BER, with no flag.  Everything here writes the shortest
-// length, the shortest integer, definite lengths throughout, `0xff` for
-// true, and sorted SET OF elements.  A writer with a tolerance flag
-// would be a writer that can produce two encodings of one value, and
-// the point of DER is that it cannot.  `asn1read.ber_limits` is on the
-// READING side alone.
-//
-// A `*_into` FUNCTION NEVER ALLOCATES AND NEVER GROWS.  It takes a
-// `Cursor` over the caller's bytes and answers how many it wrote, or
-// `AsnBufferTooSmall` with what it needed.
+// A `*_into` function writes through a `Cursor` over the caller's bytes
+// and answers how many it wrote, or `AsnBufferTooSmall` with what it
+// needed and what was left.  It never grows the buffer, and it writes
+// nothing when it refuses.
 
 use std.bytes
+use std.str
 use asn1tag
 use asn1read
+use asn1univ
+use asn1oid
+use civil
 
 // ── how long it will be ─────────────────────────────────────────────
 
@@ -55,11 +48,11 @@ use asn1read
 //     println("${asn1write.tlv_len(asn1tag.tag_integer(), 1)}")   // 3
 // ```
 pub fn tlv_len(tag: Int, content_len: Int) -> Int []
-    todo("asn1write.tlv_len")
+    asn1tag.header_len(tag, content_len) + content_len
 
 // How many bytes a context-specific tag's tag-length-value occupies.
 pub fn context_tlv_len(number: Int, content_len: Int) -> Int []
-    todo("asn1write.context_tlv_len")
+    asn1tag.header_len(number, content_len) + content_len
 
 // How many bytes the INTEGER `v` occupies, header included.
 //
@@ -76,7 +69,7 @@ pub fn context_tlv_len(number: Int, content_len: Int) -> Int []
 //     println("${a} ${b}")   // 3 4
 // ```
 pub fn integer_len(v: Int) -> Int []
-    todo("asn1write.integer_len")
+    tlv_len(2, int_width(v))
 
 // How many bytes an INTEGER whose content the caller already holds
 // occupies, header included.
@@ -85,16 +78,16 @@ pub fn integer_len(v: Int) -> Int []
 // than a number.  The content is written as it stands, so a caller
 // re-emitting a value it read produces the bytes it read.
 pub fn integer_bytes_len(content: Bytes) -> Int []
-    todo("asn1write.integer_bytes_len")
+    tlv_len(2, bytes.len(content))
 
 // How many bytes this OID occupies, header included.
 pub fn oid_len(o: AsnOid) -> Result<Int, AsnEncodeError> []
-    todo("asn1write.oid_len")
+    Ok(tlv_len(6, asn1oid.encoded_len(o)!))
 
 // How many bytes a BIT STRING of this many data bytes occupies, header
 // and the unused-bit byte included.
 pub fn bit_string_len(data_len: Int) -> Int []
-    todo("asn1write.bit_string_len")
+    tlv_len(3, data_len + 1)
 
 // ── writing one value ───────────────────────────────────────────────
 
@@ -105,44 +98,70 @@ pub fn bit_string_len(data_len: Int) -> Int []
 // OCTET STRING whose bytes are already somewhere, a SEQUENCE whose
 // children are written next.
 pub fn write_header_into(tag: Int, constructed: Bool, content_len: Int,
-                         mut dst: Cursor) -> Result<Int, AsnEncodeError> []
-    todo("asn1write.write_header_into")
+                         var dst: Cursor) -> Result<Int, AsnEncodeError> []
+    if tag < 0 or content_len < 0
+        return Err(AsnNegativeValue((if tag < 0 then "tag number" else "length")))
+    let need = asn1tag.header_len(tag, content_len)
+    room(dst, need)!
+    put_header(dst, 0, constructed, tag, content_len)
+    Ok(need)
 
 // Write a context-specific header, `[n]`.
 pub fn write_context_header_into(number: Int, constructed: Bool, content_len: Int,
-                                 mut dst: Cursor) -> Result<Int, AsnEncodeError> []
-    todo("asn1write.write_context_header_into")
+                                 var dst: Cursor) -> Result<Int, AsnEncodeError> []
+    if number < 0 or content_len < 0
+        return Err(AsnNegativeValue((if number < 0 then "tag number" else "length")))
+    let need = asn1tag.header_len(number, content_len)
+    room(dst, need)!
+    put_header(dst, 2, constructed, number, content_len)
+    Ok(need)
 
 // Write a whole primitive value: header, then these content bytes.
-pub fn write_tlv_into(tag: Int, content: Bytes, mut dst: Cursor) -> Result<Int, AsnEncodeError> []
-    todo("asn1write.write_tlv_into")
+pub fn write_tlv_into(tag: Int, content: Bytes, var dst: Cursor) -> Result<Int, AsnEncodeError> []
+    if tag < 0
+        return Err(AsnNegativeValue("tag number"))
+    let n = bytes.len(content)
+    room(dst, tlv_len(tag, n))!
+    put_header(dst, 0, false, tag, n)
+    dst.put_bytes(content)
+    Ok(tlv_len(tag, n))
 
 // Write a BOOLEAN: `01 01 ff` or `01 01 00`.
 //
 // `0xff` and not 1, which is DER's rule and the thing a hand-written
 // encoder gets wrong first.
-pub fn write_boolean_into(v: Bool, mut dst: Cursor) -> Result<Int, AsnEncodeError> []
-    todo("asn1write.write_boolean_into")
+pub fn write_boolean_into(v: Bool, var dst: Cursor) -> Result<Int, AsnEncodeError> []
+    room(dst, 3)!
+    put_header(dst, 0, false, 1, 1)
+    dst.put_u8((if v then 255 else 0))
+    Ok(3)
 
 // Write an INTEGER from a number.
-pub fn write_integer_into(v: Int, mut dst: Cursor) -> Result<Int, AsnEncodeError> []
-    todo("asn1write.write_integer_into")
+pub fn write_integer_into(v: Int, var dst: Cursor) -> Result<Int, AsnEncodeError> []
+    let w = int_width(v)
+    room(dst, tlv_len(2, w))!
+    put_header(dst, 0, false, 2, w)
+    for k in 0..w
+        dst.put_u8((v >> (8 * (w - 1 - k))) & 255)
+    Ok(tlv_len(2, w))
 
 // Write an INTEGER from content bytes the caller already holds.
 //
 // The content is written as it stands, leading zero included — a caller
 // re-emitting a serial number it read produces the bytes it read, which
 // is what keeps a re-encoded certificate's signature valid.
-pub fn write_integer_bytes_into(content: Bytes, mut dst: Cursor) -> Result<Int, AsnEncodeError> []
-    todo("asn1write.write_integer_bytes_into")
+pub fn write_integer_bytes_into(content: Bytes, var dst: Cursor) -> Result<Int, AsnEncodeError> []
+    write_tlv_into(2, content, dst)
 
 // Write a NULL: `05 00`, always.
-pub fn write_null_into(mut dst: Cursor) -> Result<Int, AsnEncodeError> []
-    todo("asn1write.write_null_into")
+pub fn write_null_into(var dst: Cursor) -> Result<Int, AsnEncodeError> []
+    room(dst, 2)!
+    put_header(dst, 0, false, 5, 0)
+    Ok(2)
 
 // Write an OCTET STRING.
-pub fn write_octet_string_into(content: Bytes, mut dst: Cursor) -> Result<Int, AsnEncodeError> []
-    todo("asn1write.write_octet_string_into")
+pub fn write_octet_string_into(content: Bytes, var dst: Cursor) -> Result<Int, AsnEncodeError> []
+    write_tlv_into(4, content, dst)
 
 // Write a BIT STRING: the unused-bit count, then the data.
 //
@@ -150,62 +169,97 @@ pub fn write_octet_string_into(content: Bytes, mut dst: Cursor) -> Result<Int, A
 // is a BIT STRING with zero unused bits, which is the only form
 // anything in PKIX writes.
 pub fn write_bit_string_into(unused_bits: Int, data: Bytes,
-                             mut dst: Cursor) -> Result<Int, AsnEncodeError> []
-    todo("asn1write.write_bit_string_into")
+                             var dst: Cursor) -> Result<Int, AsnEncodeError> []
+    if unused_bits < 0 or unused_bits > 7 or unused_bits > 0 and bytes.len(data) == 0
+        return Err(AsnBadUnusedBits(unused_bits))
+    let n = bytes.len(data) + 1
+    room(dst, tlv_len(3, n))!
+    put_header(dst, 0, false, 3, n)
+    dst.put_u8(unused_bits)
+    dst.put_bytes(data)
+    Ok(tlv_len(3, n))
 
 // Write an OBJECT IDENTIFIER: `06`, the length, the packed arcs.
-pub fn write_oid_into(o: AsnOid, mut dst: Cursor) -> Result<Int, AsnEncodeError> []
-    todo("asn1write.write_oid_into")
+pub fn write_oid_into(o: AsnOid, var dst: Cursor) -> Result<Int, AsnEncodeError> []
+    let n = asn1oid.encoded_len(o)!
+    room(dst, tlv_len(6, n))!
+    put_header(dst, 0, false, 6, n)
+    asn1oid.encode_into(o, dst)!
+    Ok(tlv_len(6, n))
 
 // Write a UTF8String.
-pub fn write_utf8_string_into(s: Str, mut dst: Cursor) -> Result<Int, AsnEncodeError> []
-    todo("asn1write.write_utf8_string_into")
+pub fn write_utf8_string_into(s: Str, var dst: Cursor) -> Result<Int, AsnEncodeError> []
+    write_text(12, s, dst)
 
 // Write a PrintableString.
 //
 // `AsnStringNotAllowed` for a character outside the restricted
 // alphabet, naming the offset — refused rather than silently promoted
-// to UTF8String, because the TYPE is part of what a name matches on and
+// to UTF8String, because the type is part of what a name matches on and
 // changing it changes the bytes a signature covers.
-pub fn write_printable_string_into(s: Str, mut dst: Cursor) -> Result<Int, AsnEncodeError> []
-    todo("asn1write.write_printable_string_into")
+pub fn write_printable_string_into(s: Str, var dst: Cursor) -> Result<Int, AsnEncodeError> []
+    for i in 0..str.len(s)
+        if not asn1univ.is_printable_string(str.slice(s, i, i + 1))
+            return Err(AsnStringNotAllowed(19, i))
+    write_text(19, s, dst)
 
 // Write an IA5String.
-pub fn write_ia5_string_into(s: Str, mut dst: Cursor) -> Result<Int, AsnEncodeError> []
-    todo("asn1write.write_ia5_string_into")
+pub fn write_ia5_string_into(s: Str, var dst: Cursor) -> Result<Int, AsnEncodeError> []
+    for i in 0..str.len(s)
+        if str.byte_at_or(s, i, 0) > 127
+            return Err(AsnStringNotAllowed(22, i))
+    write_text(22, s, dst)
 
 // Write a UTCTime: `YYMMDDHHMMSSZ`, always with the `Z`.
 //
 // `AsnTimeNotWritable` outside 1950 to 2049, which is the whole range
 // a two-digit year can name unambiguously.  A caller with a date
 // outside it writes a GeneralizedTime, and RFC 5280 says exactly that.
-pub fn write_utc_time_into(t: CivilDateTime, mut dst: Cursor) -> Result<Int, AsnEncodeError> []
-    todo("asn1write.write_utc_time_into")
+pub fn write_utc_time_into(t: CivilDateTime, var dst: Cursor) -> Result<Int, AsnEncodeError> []
+    let y = t.date.year
+    if y < 1950 or y > 2049
+        return Err(AsnTimeNotWritable(y))
+    write_text(23, time_text(t, 2), dst)
 
 // Write a GeneralizedTime: `YYYYMMDDHHMMSSZ`, always with the `Z` and
 // never with a fractional second, which DER forbids when it would be
 // zero.
 pub fn write_generalized_time_into(t: CivilDateTime,
-                                   mut dst: Cursor) -> Result<Int, AsnEncodeError> []
-    todo("asn1write.write_generalized_time_into")
+                                   var dst: Cursor) -> Result<Int, AsnEncodeError> []
+    let y = t.date.year
+    if y < 0 or y > 9999
+        return Err(AsnTimeNotWritable(y))
+    write_text(24, time_text(t, 4), dst)
 
 // Write an EXPLICIT context tag around a value that is already encoded:
 // `[n]` constructed, the length, then those bytes.
 //
 // Two headers, which is what explicit tagging is.
 pub fn write_explicit_into(number: Int, inner: Bytes,
-                           mut dst: Cursor) -> Result<Int, AsnEncodeError> []
-    todo("asn1write.write_explicit_into")
+                           var dst: Cursor) -> Result<Int, AsnEncodeError> []
+    if number < 0
+        return Err(AsnNegativeValue("tag number"))
+    let n = bytes.len(inner)
+    room(dst, context_tlv_len(number, n))!
+    put_header(dst, 2, true, number, n)
+    dst.put_bytes(inner)
+    Ok(context_tlv_len(number, n))
 
 // Write an IMPLICIT context tag over a value that is already encoded:
 // the value's own header replaced by `[n]`.
 //
-// One header.  `AsnStringNotAllowed` is not the refusal here — the
-// input must already be a whole tag-length-value, and a caller that
-// hands over content instead produces a document nobody can read.
+// One header.  `value` must be exactly one whole tag-length-value;
+// anything else is `AsnNotOneValue`.
 pub fn write_implicit_into(number: Int, constructed: Bool, value: Bytes,
-                           mut dst: Cursor) -> Result<Int, AsnEncodeError> []
-    todo("asn1write.write_implicit_into")
+                           var dst: Cursor) -> Result<Int, AsnEncodeError> []
+    if number < 0
+        return Err(AsnNegativeValue("tag number"))
+    let content = content_of(value)!
+    let n = bytes.len(content)
+    room(dst, context_tlv_len(number, n))!
+    put_header(dst, 2, constructed, number, n)
+    dst.put_bytes(content)
+    Ok(context_tlv_len(number, n))
 
 // Sort encoded values the way DER's SET OF requires: ascending by the
 // encodings themselves, shorter first when one is a prefix of the
@@ -216,7 +270,15 @@ pub fn write_implicit_into(number: Int, constructed: Bool, value: Bytes,
 // rule, and because the rule is a sentence rather than an obvious
 // consequence.
 pub fn sort_set_of(items: [Bytes]) -> [Bytes] []
-    todo("asn1write.sort_set_of")
+    var keyed: [(Str, Int)] = []
+    for i in 0..list.len(items)
+        list.push(keyed, (bytes.to_hex(items[i]), i))
+    list.sort(keyed)
+    var out: [Bytes] = []
+    for pair in keyed
+        let (_, i) = pair
+        list.push(out, bytes.clone(items[i]))
+    out
 
 // ── the builder, for a caller who will not size first ───────────────
 
@@ -244,7 +306,7 @@ pub struct AsnBuildLimits
 
 // The builder's default bounds: depth 64, a 16 MiB value.
 pub fn build_limits() -> AsnBuildLimits []
-    todo("asn1write.build_limits")
+    AsnBuildLimits { max_depth: 64, max_length: 16777216 }
 
 // A fresh builder, at the top level.
 //
@@ -256,23 +318,23 @@ pub fn build_limits() -> AsnBuildLimits []
 //     println("${asn1write.builder_depth(b)}")   // 0
 // ```
 pub fn builder(limits: AsnBuildLimits) -> AsnBuilder []
-    todo("asn1write.builder")
+    AsnBuilder { stack: [bytes.zeros(0)], tags: [0], kinds: [0], depth: 0, limits: limits }
 
 // How many constructed values are open.
 pub fn builder_depth(b: AsnBuilder) -> Int []
-    todo("asn1write.builder_depth")
+    b.depth
 
 // How many bytes the value at the top of the stack holds so far.
 pub fn builder_len(b: AsnBuilder) -> Int []
-    todo("asn1write.builder_len")
+    bytes.len(b.stack[b.depth])
 
 // Open a SEQUENCE.
 pub fn begin_sequence(b: AsnBuilder) -> Result<AsnBuilder, AsnEncodeError> []
-    todo("asn1write.begin_sequence")
+    open(b, 16, SEQUENCE)
 
 // Open a SET.
 pub fn begin_set(b: AsnBuilder) -> Result<AsnBuilder, AsnEncodeError> []
-    todo("asn1write.begin_set")
+    open(b, 17, SET)
 
 // Open a SET OF, whose children are sorted by `sort_set_of` when it is
 // closed.
@@ -281,61 +343,88 @@ pub fn begin_set(b: AsnBuilder) -> Result<AsnBuilder, AsnEncodeError> []
 // difference, and a flag would let a caller forget which kind it
 // opened.
 pub fn begin_set_of(b: AsnBuilder) -> Result<AsnBuilder, AsnEncodeError> []
-    todo("asn1write.begin_set_of")
+    open(b, 17, SET_OF)
 
 // Open an EXPLICIT context tag `[n]`.
 pub fn begin_explicit(b: AsnBuilder, number: Int) -> Result<AsnBuilder, AsnEncodeError> []
-    todo("asn1write.begin_explicit")
+    if number < 0
+        return Err(AsnNegativeValue("tag number"))
+    open(b, number, EXPLICIT)
 
 // Close the open constructed value: write its header into the level
 // below, then its bytes.
 //
-// `AsnEncodeDepthExceeded` is the open direction's refusal; closing
-// more than was opened is the caller's own mistake and is a panic
-// rather than a value, because no input can produce it.
+// A SET OF's members are sorted by `sort_set_of` here.  `AsnNothingOpen`
+// when no constructed value is open.
 pub fn end(b: AsnBuilder) -> Result<AsnBuilder, AsnEncodeError> []
-    todo("asn1write.end")
+    if b.depth == 0
+        return Err(AsnNothingOpen)
+    let top = b.stack[b.depth]
+    let content = if b.kinds[b.depth] == SET_OF
+        bytes.concat(sort_set_of(members(top)))
+    else
+        top
+    let class = if b.kinds[b.depth] == EXPLICIT
+        2
+    else
+        0
+    let whole = bytes.concat([header_bytes(class, true, b.tags[b.depth], bytes.len(content)), content])
+    let closed = AsnBuilder { stack: b.stack[0:b.depth], tags: b.tags[0:b.depth], kinds: b.kinds[0:b.depth],
+                              depth: b.depth - 1, limits: b.limits }
+    add(closed, whole)
 
 // Add a BOOLEAN.
 pub fn put_boolean(b: AsnBuilder, v: Bool) -> Result<AsnBuilder, AsnEncodeError> []
-    todo("asn1write.put_boolean")
+    add(b, bytes.from_hex((if v then "0101ff" else "010100")) ?? bytes.zeros(0))
 
 // Add an INTEGER from a number.
 pub fn put_integer(b: AsnBuilder, v: Int) -> Result<AsnBuilder, AsnEncodeError> []
-    todo("asn1write.put_integer")
+    let w = int_width(v)
+    var buf = bytes.zeros(tlv_len(2, w))
+    var c = bytes.cursor_be(buf)
+    write_integer_into(v, c)!
+    add(b, c.finish())
 
 // Add an INTEGER from content bytes.
 pub fn put_integer_bytes(b: AsnBuilder, content: Bytes) -> Result<AsnBuilder, AsnEncodeError> []
-    todo("asn1write.put_integer_bytes")
+    add(b, tlv(2, content))
 
 // Add a NULL.
 pub fn put_null(b: AsnBuilder) -> Result<AsnBuilder, AsnEncodeError> []
-    todo("asn1write.put_null")
+    add(b, tlv(5, bytes.zeros(0)))
 
 // Add an OCTET STRING.
 pub fn put_octet_string(b: AsnBuilder, content: Bytes) -> Result<AsnBuilder, AsnEncodeError> []
-    todo("asn1write.put_octet_string")
+    add(b, tlv(4, content))
 
 // Add a BIT STRING.
 pub fn put_bit_string(b: AsnBuilder, unused_bits: Int,
                       data: Bytes) -> Result<AsnBuilder, AsnEncodeError> []
-    todo("asn1write.put_bit_string")
+    var c = bytes.cursor_be(bytes.zeros(bit_string_len(bytes.len(data))))
+    write_bit_string_into(unused_bits, data, c)!
+    add(b, c.finish())
 
 // Add an OBJECT IDENTIFIER.
 pub fn put_oid(b: AsnBuilder, o: AsnOid) -> Result<AsnBuilder, AsnEncodeError> []
-    todo("asn1write.put_oid")
+    var c = bytes.cursor_be(bytes.zeros(oid_len(o)!))
+    write_oid_into(o, c)!
+    add(b, c.finish())
 
 // Add a UTF8String.
 pub fn put_utf8_string(b: AsnBuilder, s: Str) -> Result<AsnBuilder, AsnEncodeError> []
-    todo("asn1write.put_utf8_string")
+    add(b, tlv(12, bytes.from_str(s)))
 
 // Add a PrintableString.
 pub fn put_printable_string(b: AsnBuilder, s: Str) -> Result<AsnBuilder, AsnEncodeError> []
-    todo("asn1write.put_printable_string")
+    var c = bytes.cursor_be(bytes.zeros(tlv_len(19, str.len(s))))
+    write_printable_string_into(s, c)!
+    add(b, c.finish())
 
 // Add an IA5String.
 pub fn put_ia5_string(b: AsnBuilder, s: Str) -> Result<AsnBuilder, AsnEncodeError> []
-    todo("asn1write.put_ia5_string")
+    var c = bytes.cursor_be(bytes.zeros(tlv_len(22, str.len(s))))
+    write_ia5_string_into(s, c)!
+    add(b, c.finish())
 
 // Add either time type, choosing by the year: UTCTime from 1950 to
 // 2049, GeneralizedTime otherwise.
@@ -343,14 +432,23 @@ pub fn put_ia5_string(b: AsnBuilder, s: Str) -> Result<AsnBuilder, AsnEncodeErro
 // RFC 5280's own rule, as one call, because a caller writing a validity
 // period should not have to know where the boundary is.
 pub fn put_time(b: AsnBuilder, t: CivilDateTime) -> Result<AsnBuilder, AsnEncodeError> []
-    todo("asn1write.put_time")
+    let y = t.date.year
+    let utc = y >= 1950 and y <= 2049
+    var c = bytes.cursor_be(bytes.zeros(tlv_len(24, 15)))
+    if utc
+        write_utc_time_into(t, c)!
+    else
+        write_generalized_time_into(t, c)!
+    add(b, bytes.slice(c.finish(), 0, (if utc then 15 else 17)))
 
-// Add a value that is already encoded, as it stands.
+// Add a value that is already encoded, as it stands.  Nothing checks
+// that it is one whole value.
+
 //
 // What a caller re-emitting something it read uses — a TBSCertificate's
 // bytes, an extension whose structure this package does not know.
 pub fn put_encoded(b: AsnBuilder, value: Bytes) -> Result<AsnBuilder, AsnEncodeError> []
-    todo("asn1write.put_encoded")
+    add(b, value)
 
 // Close the builder and answer the document's bytes.
 //
@@ -371,4 +469,123 @@ pub fn put_encoded(b: AsnBuilder, value: Bytes) -> Result<AsnBuilder, AsnEncodeE
 //         Err(e) => println(e.message())
 // ```
 pub fn done(b: AsnBuilder) -> Result<Bytes, AsnEncodeError> []
-    todo("asn1write.done")
+    if b.depth > 0
+        return Err(AsnUnclosedValue(b.depth))
+    Ok(bytes.clone(b.stack[0]))
+
+// ── the parts the writers above share ───────────────────────────────
+
+// What an open builder level will be closed as.
+const SEQUENCE: Int = 0
+const SET: Int = 1
+const SET_OF: Int = 2
+const EXPLICIT: Int = 3
+
+// How many content bytes the shortest two's complement form of `v`
+// occupies: 1 to 8.
+fn int_width(v: Int) -> Int []
+    var w = 1
+    for k in 1..8
+        let rest = v >> (8 * k - 1)
+        if rest != 0 and rest != -1
+            w = k + 1
+    w
+
+// Refuse when the cursor has fewer than `need` bytes left.
+fn room(dst: Cursor, need: Int) -> Result<Unit, AsnEncodeError> []
+    let left = dst.remaining()
+    if need > left
+        return Err(AsnBufferTooSmall(need, left))
+    Ok()
+
+// Write an identifier and a length through the cursor.  The caller has
+// checked the room.
+fn put_header(var dst: Cursor, class: Int, constructed: Bool, tag: Int, len: Int) []
+    let id = asn1tag.emit_identifier(class, constructed, tag)
+    for i in 0..id.len
+        dst.put_u8(id.out[i] as Int)
+    let l = asn1tag.emit_length(len)
+    for i in 0..l.len
+        dst.put_u8(l.out[i] as Int)
+
+// A primitive universal value whose content is text.
+fn write_text(tag: Int, s: Str, var dst: Cursor) -> Result<Int, AsnEncodeError> []
+    let n = str.len(s)
+    room(dst, tlv_len(tag, n))!
+    put_header(dst, 0, false, tag, n)
+    for i in 0..n
+        dst.put_u8(str.byte_at_or(s, i, 0))
+    Ok(tlv_len(tag, n))
+
+// A time as `YYMMDDHHMMSSZ` or `YYYYMMDDHHMMSSZ`, with any fraction of a
+// second dropped.
+fn time_text(t: CivilDateTime, year_digits: Int) -> Str []
+    let year = if year_digits == 2
+        t.date.year % 100
+    else
+        t.date.year
+    pad(year, year_digits) + pad(t.date.month, 2) + pad(t.date.day, 2) + pad(t.time.hour, 2)
+        + pad(t.time.minute, 2) + pad(t.time.second, 2) + "Z"
+
+fn pad(v: Int, width: Int) -> Str []
+    var s = str.from_int(v)
+    while str.len(s) < width
+        s = "0" + s
+    s
+
+// The header bytes of a value, as their own buffer.
+fn header_bytes(class: Int, constructed: Bool, tag: Int, len: Int) -> Bytes []
+    var c = bytes.cursor_be(bytes.zeros(asn1tag.header_len(tag, len)))
+    put_header(c, class, constructed, tag, len)
+    c.finish()
+
+// A primitive universal value.
+fn tlv(tag: Int, content: Bytes) -> Bytes []
+    bytes.concat([header_bytes(0, false, tag, bytes.len(content)), content])
+
+// The content of bytes that must be exactly one whole value.
+fn content_of(value: Bytes) -> Result<Bytes, AsnEncodeError> []
+    let limits = asn1read.ber_limits()
+    let whole = match asn1read.value_span_at(value, 0, limits)
+        Ok(s)  => s
+        Err(_) =>
+            return Err(AsnNotOneValue(bytes.len(value)))
+    let Ok(content) = asn1read.content_span_at(value, 0, limits) else return Err(AsnNotOneValue(bytes.len(value)))
+    if whole.len != bytes.len(value)
+        return Err(AsnNotOneValue(bytes.len(value)))
+    Ok(asn1read.span_bytes(value, content))
+
+// The whole values one after another in `content`, each as its bytes.
+fn members(content: Bytes) -> [Bytes] []
+    var out: [Bytes] = []
+    var p = 0
+    while p < bytes.len(content)
+        // Bytes added with `put_encoded` that are not a value stay
+        // together as the last member.
+        var n = bytes.len(content) - p
+        if let Ok(s) = asn1read.value_span_at(content, p, asn1read.ber_limits())
+            n = s.len
+        list.push(out, bytes.slice(content, p, p + n))
+        p = p + n
+    out
+
+// Open a constructed value.
+fn open(b: AsnBuilder, tag: Int, kind: Int) -> Result<AsnBuilder, AsnEncodeError> []
+    if b.depth + 1 > b.limits.max_depth
+        return Err(AsnEncodeDepthExceeded(b.limits.max_depth))
+    var stack = b.stack[:]
+    list.push(stack, bytes.zeros(0))
+    var tags = b.tags[:]
+    list.push(tags, tag)
+    var kinds = b.kinds[:]
+    list.push(kinds, kind)
+    Ok(AsnBuilder { stack: stack, tags: tags, kinds: kinds, depth: b.depth + 1, limits: b.limits })
+
+// Append a whole value to the open level.
+fn add(b: AsnBuilder, value: Bytes) -> Result<AsnBuilder, AsnEncodeError> []
+    var grown = bytes.concat([b.stack[b.depth], value])
+    if bytes.len(grown) > b.limits.max_length
+        return Err(AsnBufferTooSmall(bytes.len(grown), b.limits.max_length))
+    var stack = b.stack[:]
+    stack[b.depth] = grown
+    Ok(AsnBuilder { stack: stack, tags: b.tags, kinds: b.kinds, depth: b.depth, limits: b.limits })

@@ -1,39 +1,28 @@
 // asn1read — tag, length, value, read out of bytes the caller already
 // holds.
 //
-// Every body is a `todo()`.  The signatures are the design, and the
-// compiler checks them as claims; see the README for the stamp.
+// There are two ways in.  By offset is how a certificate is read: the
+// document is in memory whole, and a parser asks for the header at an
+// offset, the span a value's content occupies, or the children of a
+// SEQUENCE.  Nothing is copied, and every span points into the caller's
+// own bytes.  A signature is computed over a span of the original
+// document, so a parser that copied would make the caller find it again.
 //
-// TWO SURFACES, BECAUSE THERE ARE TWO WAYS TO MEET A DER DOCUMENT.
+// By feeding is how a large document arrives: `feed` takes chunks and
+// answers events, and the content of a primitive value is handed over
+// whole.
 //
-// BY OFFSET, which is how a certificate is read.  A document is
-// nested, it is in memory whole, and what a parser wants is "the
-// header at this offset", "the span this value's content occupies",
-// "the children of this SEQUENCE".  Nothing is copied, and every span
-// points into the caller's own bytes — which matters more here than
-// anywhere else in the grid, because a signature is computed over a
-// SPAN of the original document and a parser that copied would make
-// the caller re-derive it.
+// Every read is bounded.  ASN.1 nesting has no limit in the standard,
+// and thirty bytes can ask for a thousand levels of SEQUENCE.
+// `AsnLimits` names the depth and the largest value a reader accepts.
 //
-// BY FEEDING, which is how a large document arrives.  A certificate
-// chain over a socket, a CRL of a hundred megabytes.  `feed` takes
-// chunks and drains events, and the payload of a primitive value is
-// handed over whole because the values in PKIX are small.
-//
-// THE DEPTH BOUND IS NOT OPTIONAL.  ASN.1's nesting is unbounded by
-// specification and a thirty-byte input can ask for a thousand levels
-// of SEQUENCE.  Every implementation bounds it; this one says where the
-// number is instead of hiding it.
-//
-// DER, AND BER WHERE THE REFERENCE IS TOLERANT.  DER is the default and
-// the refusals name the rules by their own names —
-// `AsnNonMinimalLength`, `AsnIndefiniteLength`, `AsnBadBoolean`,
-// `AsnNonMinimalInteger`, `AsnSetOfNotSorted`.  `ber_tolerant` accepts
-// the five, because a program reading what is already deployed meets
-// them and refusing would leave a caller with nothing but the bytes.
-// It is a FLAG AND NOT A DEFAULT, because a signature is computed over
-// bytes and two encodings of one value is how a signature checks out
-// over something the reader did not read.
+// DER is the default, and each of the five rules DER adds to BER has a
+// refusal of its own: `AsnNonMinimalLength`, `AsnIndefiniteLength`,
+// `AsnBadBoolean`, `AsnNonMinimalInteger` and `AsnSetOfNotSorted`.
+// `ber_tolerant` accepts the five, for a file another tool wrote when no
+// signature is checked over the bytes.  An indefinite length is
+// accepted only on a constructed value, as X.690 section 8.1.3.2
+// requires.
 
 use std.bytes
 
@@ -113,14 +102,14 @@ pub struct AsnLimits
 //     println("${asn1read.default_limits().ber_tolerant}")   // false
 // ```
 pub fn default_limits() -> AsnLimits []
-    todo("asn1read.default_limits")
+    AsnLimits { max_depth: 64, max_length: 16777216, ber_tolerant: false }
 
 // The same bounds with the five BER rules accepted.
 //
 // What a program reading a file somebody else's tool wrote uses, when
 // no signature is being checked over the bytes.
 pub fn ber_limits() -> AsnLimits []
-    todo("asn1read.ber_limits")
+    AsnLimits { max_depth: 64, max_length: 16777216, ber_tolerant: true }
 
 // ── by offset ───────────────────────────────────────────────────────
 
@@ -143,29 +132,36 @@ pub fn ber_limits() -> AsnLimits []
 //     // 16 3 2
 // ```
 pub fn header_at(src: Bytes, off: Int, limits: AsnLimits) -> Result<AsnHeader, AsnDecodeError> []
-    todo("asn1read.header_at")
+    parse_header(src, off, limits, 0)
 
 // The span the value at `off` occupies, header included.
 //
 // What a caller adds to `off` to reach the next sibling.
 pub fn value_span_at(src: Bytes, off: Int, limits: AsnLimits) -> Result<AsnSpan, AsnDecodeError> []
-    todo("asn1read.value_span_at")
+    let n = value_len(src, off, limits, 0)!
+    Ok(AsnSpan { off: off, len: n })
 
-// The span the CONTENT of the value at `off` occupies, header
+// The span the content of the value at `off` occupies, header
 // excluded.
 //
 // The one a caller wants nine times out of ten: the bytes of the
 // INTEGER, the bytes inside the SEQUENCE.
 pub fn content_span_at(src: Bytes, off: Int,
                        limits: AsnLimits) -> Result<AsnSpan, AsnDecodeError> []
-    todo("asn1read.content_span_at")
+    let h = parse_header(src, off, limits, 0)!
+    let n = value_len(src, off, limits, 0)!
+    let eoc = if h.indefinite
+        2
+    else
+        0
+    Ok(AsnSpan { off: off + h.header_len, len: n - h.header_len - eoc })
 
 // The offset of the value after the one at `off`.
 //
 // `off` plus the whole value's length, which is what walking a
 // SEQUENCE's children by hand looks like.
 pub fn next_offset(src: Bytes, off: Int, limits: AsnLimits) -> Result<Int, AsnDecodeError> []
-    todo("asn1read.next_offset")
+    Ok(off + value_len(src, off, limits, 0)!)
 
 // Every child of the constructed value at `off`, as whole-value spans.
 //
@@ -184,7 +180,20 @@ pub fn next_offset(src: Bytes, off: Int, limits: AsnLimits) -> Result<Int, AsnDe
 //         Err(e)   => println(e.message())
 // ```
 pub fn children_at(src: Bytes, off: Int, limits: AsnLimits) -> Result<[AsnSpan], AsnDecodeError> []
-    todo("asn1read.children_at")
+    let h = parse_header(src, off, limits, 0)!
+    if not h.tag.constructed
+        return Err(AsnWrongConstruction(off, false))
+    let whole = value_len(src, off, limits, 0)!
+    let end = off + whole - (if h.indefinite then 2 else 0)
+    var kids: [AsnSpan] = []
+    var p = off + h.header_len
+    while p < end
+        let n = value_len(src, p, limits, 1)!
+        if p + n > end
+            return Err(AsnLengthOverrun(p, n, end - p))
+        list.push(kids, AsnSpan { off: p, len: n })
+        p = p + n
+    Ok(kids)
 
 // The content span of the value at `off`, refusing anything but this
 // universal tag.
@@ -195,7 +204,13 @@ pub fn children_at(src: Bytes, off: Int, limits: AsnLimits) -> Result<[AsnSpan],
 // own ASN.1 module.
 pub fn expect_at(src: Bytes, off: Int, tag: Int,
                  limits: AsnLimits) -> Result<AsnSpan, AsnDecodeError> []
-    todo("asn1read.expect_at")
+    let h = parse_header(src, off, limits, 0)!
+    if h.tag.class != AsnUniversal or h.tag.number != tag
+        return Err(AsnUnexpectedTag(off, tag, h.tag.number))
+    let collection = tag == 16 or tag == 17
+    if h.tag.constructed != collection
+        return Err(AsnWrongConstruction(off, h.tag.constructed))
+    content_span_at(src, off, limits)
 
 // The content span of a context-specific tag `[n]`, refusing anything
 // else.
@@ -204,10 +219,13 @@ pub fn expect_at(src: Bytes, off: Int, tag: Int,
 // certificate's `[0] version` and `[3] extensions`.
 pub fn expect_context_at(src: Bytes, off: Int, number: Int,
                          limits: AsnLimits) -> Result<AsnSpan, AsnDecodeError> []
-    todo("asn1read.expect_context_at")
+    let h = parse_header(src, off, limits, 0)!
+    if h.tag.class != AsnContext or h.tag.number != number
+        return Err(AsnUnexpectedTag(off, number, h.tag.number))
+    content_span_at(src, off, limits)
 
 // The content span of an EXPLICIT context tag `[n]`: the tag's content
-// is one whole value, and this answers THAT value's content.
+// is one whole value, and this answers that value's content.
 //
 // Explicit and implicit tagging is the distinction that costs an
 // afternoon.  An EXPLICIT `[0] INTEGER` is a `[0]` wrapping an INTEGER
@@ -217,7 +235,14 @@ pub fn expect_context_at(src: Bytes, off: Int, number: Int,
 // other and find a plausible wrong number.
 pub fn explicit_at(src: Bytes, off: Int, number: Int,
                    limits: AsnLimits) -> Result<AsnSpan, AsnDecodeError> []
-    todo("asn1read.explicit_at")
+    let outer = expect_context_at(src, off, number, limits)!
+    if not header_at(src, off, limits)!.tag.constructed
+        return Err(AsnWrongConstruction(off, false))
+    let inner = value_span_at(src, outer.off, limits)!
+    let left = outer.off + outer.len - (inner.off + inner.len)
+    if left != 0
+        return Err(AsnTrailingBytes(inner.off + inner.len, left))
+    content_span_at(src, outer.off, limits)
 
 // The content span of an IMPLICIT context tag `[n]`: the content is the
 // value's own, with the identifier replaced.
@@ -227,7 +252,7 @@ pub fn explicit_at(src: Bytes, off: Int, number: Int,
 // reader of the calling code should be able to see which was meant.
 pub fn implicit_at(src: Bytes, off: Int, number: Int,
                    limits: AsnLimits) -> Result<AsnSpan, AsnDecodeError> []
-    todo("asn1read.implicit_at")
+    expect_context_at(src, off, number, limits)
 
 // Whether the value at `off` carries this universal tag, without
 // refusing when it does not.
@@ -235,7 +260,7 @@ pub fn implicit_at(src: Bytes, off: Int, number: Int,
 // What an OPTIONAL field is read with: look, and move on if it is not
 // there.
 pub fn peek_tag_at(src: Bytes, off: Int, limits: AsnLimits) -> Result<AsnTag, AsnDecodeError> []
-    todo("asn1read.peek_tag_at")
+    Ok(parse_header(src, off, limits, 0)!.tag)
 
 // Read one whole value and answer how many bytes it took, refusing
 // trailing bytes.
@@ -244,7 +269,11 @@ pub fn peek_tag_at(src: Bytes, off: Int, limits: AsnLimits) -> Result<AsnTag, As
 // value, and bytes after it are `AsnTrailingBytes` rather than a
 // second document.
 pub fn read_document(src: Bytes, limits: AsnLimits) -> Result<AsnSpan, AsnDecodeError> []
-    todo("asn1read.read_document")
+    let n = check_tree(src, 0, limits, 0)!
+    let left = bytes.len(src) - n
+    if left > 0
+        return Err(AsnTrailingBytes(n, left))
+    Ok(AsnSpan { off: 0, len: n })
 
 // The bytes a span names, copied out.
 //
@@ -252,7 +281,7 @@ pub fn read_document(src: Bytes, limits: AsnLimits) -> Result<AsnSpan, AsnDecode
 // caller can see where the copy happens.  Everything else answers
 // spans.
 pub fn span_bytes(src: Bytes, s: AsnSpan) -> Bytes []
-    todo("asn1read.span_bytes")
+    bytes.slice(src, s.off, s.off + s.len)
 
 // ── by feeding ──────────────────────────────────────────────────────
 
@@ -272,7 +301,7 @@ pub enum AsnEvent
 
 // One turn of the reader.
 //
-// `need` is a HINT and never a promise: a header has no announced
+// `need` is a hint and never a promise: a header has no announced
 // length until its own length octets have arrived, so the answer is 1
 // whenever the reader is inside one.  It is 0 when the reader is
 // between values at depth zero.
@@ -295,41 +324,51 @@ pub struct AsnReader
 
 // A fresh reader over one document.
 pub fn reader(limits: AsnLimits) -> AsnReader []
-    todo("asn1read.reader")
+    AsnReader { limits: limits, pending: bytes.zeros(0), offset: 0, depth: 0, open: [] }
 
 // Feed a chunk and take every value that finished.
 //
 // A value split across chunks stays pending until the rest arrives; a
 // chunk that finishes nothing is an empty event list and not an error.
 pub fn feed(r: AsnReader, chunk: [u8]) -> Result<AsnStep, AsnDecodeError> []
-    todo("asn1read.feed")
+    var ints: [Int] = []
+    for b in chunk
+        list.push(ints, b as Int)
+    advance(r, bytes.concat([r.pending, bytes.from_byte_list(ints)]))
 
-// Say that the document ends here.
+// Say that the document ends here.  A reader reads one document: bytes
+// after its first complete value are `AsnTrailingBytes`, from `feed` or
+// from here.
+
 //
 // Bytes still pending are `AsnTruncated`; a constructed value still
 // open is too.  A document that ends cleanly answers a step with `need`
 // 0.
 pub fn finish(r: AsnReader) -> Result<AsnStep, AsnDecodeError> []
-    todo("asn1read.finish")
+    let s = advance(r, r.pending)!
+    let left = bytes.len(s.reader.pending)
+    if left > 0 or s.reader.depth > 0
+        return Err(AsnTruncated(s.reader.offset + left, (if s.need > 0 then s.need else 1)))
+    Ok(AsnStep { reader: s.reader, events: s.events, need: 0 })
 
 // How many bytes the reader has consumed since it was made.
 //
 // The number every `AsnDecodeError`'s `at` is counted in.
 pub fn offset(r: AsnReader) -> Int []
-    todo("asn1read.offset")
+    r.offset
 
 // How many fed bytes are waiting for the rest of their value.
 pub fn pending_len(r: AsnReader) -> Int []
-    todo("asn1read.pending_len")
+    bytes.len(r.pending)
 
 // How many constructed values are open.
 pub fn depth(r: AsnReader) -> Int []
-    todo("asn1read.depth")
+    r.depth
 
 // Whether the reader is between values at depth zero, and so would
 // accept `finish` without refusing.
 pub fn at_boundary(r: AsnReader) -> Bool []
-    todo("asn1read.at_boundary")
+    r.depth == 0 and bytes.len(r.pending) == 0
 
 // Every value in a buffer the caller already holds entirely, as events.
 //
@@ -337,7 +376,12 @@ pub fn at_boundary(r: AsnReader) -> Bool []
 // in one piece, and what a tool that dumps a certificate's structure
 // calls.
 pub fn walk(src: Bytes, limits: AsnLimits) -> Result<[AsnEvent], AsnDecodeError> []
-    todo("asn1read.walk")
+    let r = reader(limits)
+    let s = advance(r, src)!
+    let end = finish(s.reader)!
+    var events = s.events[:]
+    list.append(events, end.events)
+    Ok(events)
 
 // ── the bound effect parameter ──────────────────────────────────────
 
@@ -348,7 +392,225 @@ pub fn walk(src: Bytes, limits: AsnLimits) -> Result<[AsnEvent], AsnDecodeError>
 // (`docs/publishing.md` § How a `core` package takes bytes from its
 // host).  `limit` is the most bytes to read before refusing.
 //
+// The source is read 4096 bytes at a time until it answers no bytes or
+// `IoClosed`.  More than `limit` bytes is `AsnDocumentTooLarge`, and any
+// other failure of the source is `AsnTruncated` at the offset reached,
+// because the document ended there as far as the reader can tell.
+//
 // It does not replace `feed` and `finish`: a caller that cannot give up
 // control of its own loop still needs the state machine.
 pub fn drain<S: Read[e]>(r: AsnReader, src: S, limit: Int) -> Result<AsnStep, AsnDecodeError> [e]
-    todo("asn1read.drain")
+    var cur = r
+    var events: [AsnEvent] = []
+    var total = 0
+    loop
+        match src.read(4096)
+            Err(e)    =>
+                if e != IoClosed
+                    return Err(AsnTruncated(cur.offset + bytes.len(cur.pending), 1))
+                break
+            Ok(chunk) =>
+                if bytes.len(chunk) == 0
+                    break
+                total = total + bytes.len(chunk)
+                if total > limit
+                    return Err(AsnDocumentTooLarge(cur.offset, total, limit))
+                let s = advance(cur, bytes.concat([cur.pending, chunk]))!
+                list.append(events, s.events)
+                cur = s.reader
+    let end = finish(cur)!
+    list.append(events, end.events)
+    Ok(AsnStep { reader: end.reader, events: events, need: 0 })
+
+// ── the parts every read above shares ───────────────────────────────
+
+// The byte at `i`, or -1 outside the buffer.
+fn byte(src: Bytes, i: Int) -> Int []
+    bytes.byte_at(src, i) ?? -1
+
+fn class_of(id: Int) -> AsnClass []
+    match (id >> 6) & 3
+        0 => AsnUniversal
+        1 => AsnApplication
+        2 => AsnContext
+        _ => AsnPrivate
+
+// The header at `off`.  Every offset in a refusal has `base` added, so
+// the feeding reader, which parses its pending bytes, reports offsets
+// counted from the start of the document.
+fn parse_header(src: Bytes, off: Int, limits: AsnLimits,
+                base: Int) -> Result<AsnHeader, AsnDecodeError> []
+    let n = bytes.len(src)
+    if off < 0 or off >= n
+        return Err(AsnTruncated(base + off, 1))
+    let id = byte(src, off)
+    let constructed = (id & 32) != 0
+    var p = off + 1
+    var tag = id & 31
+    if tag == 31
+        tag = 0
+        var more = true
+        while more
+            let b = byte(src, p)
+            if b < 0
+                return Err(AsnTruncated(base + p, 1))
+            if p == off + 1 and b == 128 or tag > 72057594037927935
+                return Err(AsnBadTagNumber(base + p))
+            tag = tag * 128 + (b & 127)
+            more = b >= 128
+            p = p + 1
+        if tag < 31
+            return Err(AsnBadTagNumber(base + off))
+    let at = p
+    let first = byte(src, at)
+    if first < 0
+        return Err(AsnTruncated(base + at, 1))
+    p = p + 1
+    var len = first
+    var indefinite = false
+    if first == 128
+        if not (constructed and limits.ber_tolerant)
+            return Err(AsnIndefiniteLength(base + at))
+        indefinite = true
+        len = -1
+    else if first == 255
+        return Err(AsnReservedLengthForm(base + at))
+    else if first > 128
+        let count = first & 127
+        if p + count > n
+            return Err(AsnTruncated(base + n, p + count - n))
+        len = 0
+        for k in 0..count
+            if len > 36028797018963967
+                return Err(AsnLengthNotRepresentable(base + at))
+            len = len * 256 + byte(src, p + k)
+        if not limits.ber_tolerant and (byte(src, p) == 0 or len < 128)
+            return Err(AsnNonMinimalLength(base + at))
+        p = p + count
+    if len > limits.max_length
+        return Err(AsnDocumentTooLarge(base + off, len, limits.max_length))
+    let t = AsnTag { class: class_of(id), constructed: constructed, number: tag }
+    Ok(AsnHeader { tag: t, length: len, indefinite: indefinite, header_len: p - off })
+
+// How many bytes the value at `off` occupies, header included, checking
+// that it fits the buffer.  `depth` counts the constructed values the
+// value sits inside; an indefinite length is resolved by walking its
+// children to the end-of-contents marker.
+fn value_len(src: Bytes, off: Int, limits: AsnLimits, depth: Int) -> Result<Int, AsnDecodeError> []
+    let h = parse_header(src, off, limits, 0)!
+    let n = bytes.len(src)
+    if not h.indefinite
+        let left = n - off - h.header_len
+        if h.length > left
+            return Err(AsnLengthOverrun(off, h.length, left))
+        return Ok(h.header_len + h.length)
+    if depth + 1 > limits.max_depth
+        return Err(AsnDepthExceeded(off, limits.max_depth))
+    var p = off + h.header_len
+    loop
+        if p + 1 >= n
+            return Err(AsnTruncated(n, p + 2 - n))
+        if byte(src, p) == 0 and byte(src, p + 1) == 0
+            break
+        p = p + value_len(src, p, limits, depth + 1)!
+    Ok(p + 2 - off)
+
+// Check the whole value at `off`, every level of it, and answer how many
+// bytes it occupies: every header, every length inside its parent, and
+// the depth bound.
+fn check_tree(src: Bytes, off: Int, limits: AsnLimits, depth: Int) -> Result<Int, AsnDecodeError> []
+    let h = parse_header(src, off, limits, 0)!
+    let whole = value_len(src, off, limits, depth)!
+    if not h.tag.constructed
+        return Ok(whole)
+    if depth + 1 > limits.max_depth
+        return Err(AsnDepthExceeded(off, limits.max_depth))
+    let end = off + whole - (if h.indefinite then 2 else 0)
+    var p = off + h.header_len
+    while p < end
+        let n = check_tree(src, p, limits, depth + 1)!
+        if p + n > end
+            return Err(AsnLengthOverrun(p, n, end - p))
+        p = p + n
+    Ok(whole)
+
+// A tag packed into one integer, so the reader's stack of open values
+// is a list of integers.
+fn tag_code(t: AsnTag) -> Int []
+    let c = match t.class
+        AsnUniversal   => 0
+        AsnApplication => 1
+        AsnContext     => 2
+        AsnPrivate     => 3
+    t.number * 8 + c * 2 + (if t.constructed then 1 else 0)
+
+fn tag_of_code(code: Int) -> AsnTag []
+    AsnTag { class: class_of(((code >> 1) & 3) << 6),
+        constructed: (code & 1) == 1,
+        number: code >> 3 }
+
+// Read as far as `data` allows.  `data` is the reader's pending bytes
+// with any new chunk after them, and starts at document offset
+// `r.offset`.  The reader's stack holds two entries per open value:
+// where it ends, or -1 for an indefinite length, and its tag.
+fn advance(r: AsnReader, data: Bytes) -> Result<AsnStep, AsnDecodeError> []
+    var open = r.open[:]
+    var events: [AsnEvent] = []
+    let n = bytes.len(data)
+    var pos = 0
+    var need = 0
+    loop
+        let at = r.offset + pos
+        // Close every definite value that ends here.
+        while list.len(open) > 0 and open[list.len(open) - 2] == at
+            list.push(events, AsnConstructedEnd(tag_of_code(open[list.len(open) - 1]), at))
+            open = open[0:list.len(open) - 2]
+        let left = n - pos
+        if list.len(open) == 0 and at > 0
+            if left > 0
+                return Err(AsnTrailingBytes(at, left))
+            break
+        if left == 0
+            need = if list.len(open) == 0
+                0
+            else
+                1
+            break
+        if list.len(open) > 0 and open[list.len(open) - 2] == -1 and byte(data, pos) == 0
+            if left < 2
+                need = 1
+                break
+            if byte(data, pos + 1) == 0
+                list.push(events, AsnConstructedEnd(tag_of_code(open[list.len(open) - 1]), at))
+                open = open[0:list.len(open) - 2]
+                pos = pos + 2
+                continue
+        let parsed = parse_header(data, pos, r.limits, r.offset)
+        if let Err(AsnTruncated(_, more)) = parsed
+            need = more
+            break
+        let h = parsed!
+        if h.tag.class == AsnUniversal and h.tag.number == 0 and not h.tag.constructed and h.length == 0
+            return Err(AsnStrayEndOfContents(at))
+        if list.len(open) > 0 and open[list.len(open) - 2] >= 0 and not h.indefinite
+            let room = open[list.len(open) - 2] - at - h.header_len
+            if h.length > room
+                return Err(AsnLengthOverrun(at, h.length, room))
+        if h.tag.constructed
+            if list.len(open) / 2 + 1 > r.limits.max_depth
+                return Err(AsnDepthExceeded(at, r.limits.max_depth))
+            list.push(events, AsnConstructedStart(h.tag, at, h.length))
+            list.push(open, (if h.indefinite then -1 else at + h.header_len + h.length))
+            list.push(open, tag_code(h.tag))
+            pos = pos + h.header_len
+        else
+            let total = h.header_len + h.length
+            if left < total
+                need = total - left
+                break
+            list.push(events,
+                AsnPrimitiveValue(h.tag, at, bytes.slice(data, pos + h.header_len, pos + total)))
+            pos = pos + total
+    let next = AsnReader { limits: r.limits, pending: bytes.slice(data, pos, n), offset: r.offset + pos,
+                           depth: list.len(open) / 2, open: open }
+    Ok(AsnStep { reader: next, events: events, need: need })

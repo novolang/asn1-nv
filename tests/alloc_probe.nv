@@ -1,0 +1,57 @@
+// tests/alloc_probe.nv — a program that reaches every function in
+// `asn1tag`, so the emitted LLVM can be read for a call to the
+// allocator.
+//
+// This is not a test.  `tests/alloc_scan.sh` builds it with `--opt=0`
+// and reads the IR.  At the default optimisation level the probe
+// inlines into `novo_main`, and there would be no function left to
+// attribute an allocation to.
+//
+// Every public function is called, because a function the probe never
+// reaches is one the linker drops and the scan never sees.  The numbers
+// are printed rather than checked; the suites own correctness.
+
+use asn1tag
+
+fn constants() -> Int
+    asn1tag.class_universal() + asn1tag.class_application() + asn1tag.class_context() + asn1tag.class_private()
+        + asn1tag.constructed_bit() + asn1tag.tag_boolean() + asn1tag.tag_integer() + asn1tag.tag_bit_string()
+        + asn1tag.tag_octet_string() + asn1tag.tag_null() + asn1tag.tag_oid() + asn1tag.tag_enumerated()
+        + asn1tag.tag_utf8_string() + asn1tag.tag_sequence() + asn1tag.tag_set() + asn1tag.tag_printable_string()
+        + asn1tag.tag_ia5_string() + asn1tag.tag_utc_time() + asn1tag.tag_generalized_time()
+        + asn1tag.indefinite_byte() + asn1tag.end_of_contents_len()
+
+fn identifiers(id: Int) -> Int
+    var score = asn1tag.identifier_byte(asn1tag.class_context(), true, 3) + asn1tag.class_of(id)
+        + asn1tag.tag_of_low(id) + asn1tag.identifier_len(200) + asn1tag.length_len(300)
+        + asn1tag.header_len(200, 300)
+    if asn1tag.is_constructed(id) and not asn1tag.is_high_tag(id)
+        score = score + 1
+    score
+
+// A header with a high tag number and a long length, scanned byte by
+// byte.
+fn scan() -> Int
+    var h = asn1tag.head_scan()
+    for b in [0x9f, 0x81, 0x00, 0x82, 0x01, 0xf4, 0x30, 0x80]
+        h = asn1tag.head_push(h, b as u8)
+    var i = asn1tag.head_scan()
+    for b in [0x30, 0x80, 0x02, 0xff]
+        i = asn1tag.head_push(i, b as u8)
+    h.len + asn1tag.head_need(h) + i.len
+
+fn arcs() -> Int
+    var a = asn1tag.arc_scan()
+    for b in [0x86, 0x48]
+        a = asn1tag.arc_push(a, b as u8)
+    a.acc + asn1tag.first_arc(180) + asn1tag.second_arc(180) + asn1tag.pack_arcs(2, 100) + asn1tag.arc_len(840)
+
+fn emits() -> Int
+    let e1 = asn1tag.emit_identifier(asn1tag.class_context(), false, 128)
+    let e2 = asn1tag.emit_length(500)
+    let e3 = asn1tag.emit_arc(840)
+    let e4 = asn1tag.emit_length(-1)
+    e1.len + e2.len + e3.len + e4.len + e1.out[0] as Int
+
+fn main() [io]
+    println("${constants() + identifiers(48) + scan() + arcs() + emits()}")

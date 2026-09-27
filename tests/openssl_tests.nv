@@ -1,0 +1,347 @@
+// openssl_tests.nv — certificates and keys made by OpenSSL, read here
+// and compared with OpenSSL's own reading of them.
+//
+// Written by tools/openssl_vectors.py; do not edit by hand.  The
+// script's docstring says what each comparison takes from OpenSSL.
+
+use std.test
+use std.bytes
+use std.str
+use asn1read
+use asn1univ
+use asn1oid
+use asn1pkix
+use civil
+
+// Every value of a document, one line each, in the form
+// `openssl asn1parse` prints: offset, depth, header length, content
+// length, `p` or `c`, and the tag as `u` or `c` and its number.
+fn structure(der: Bytes) -> [Str]
+    let lim = asn1read.default_limits()
+    var out: [Str] = []
+    var depth = 0
+    match asn1read.walk(der, lim)
+        Ok(events) =>
+            for ev in events
+                match ev
+                    AsnConstructedStart(t, at, length) =>
+                        list.push(out, line(der, at, depth, length, "c", t))
+                        depth = depth + 1
+                    AsnPrimitiveValue(t, at, content)  =>
+                        list.push(out, line(der, at, depth, bytes.len(content), "p", t))
+                    AsnConstructedEnd(_, _)            =>
+                        depth = depth - 1
+        Err(e)     => test.fail(e.message())
+    out
+
+fn line(der: Bytes, at: Int, depth: Int, length: Int, kind: Str, t: AsnTag) -> Str
+    let hl = match asn1read.header_at(der, at, asn1read.default_limits())
+        Ok(h)  => h.header_len
+        Err(_) => -1
+    let class = if t.class == AsnContext
+        "c"
+    else
+        "u"
+    "${at}:${depth}:${hl}:${length}:${kind}:${class}${t.number}"
+
+fn instant(y: Int, mo: Int, d: Int, h: Int, mi: Int, s: Int) -> CivilDateTime
+    let Ok(day) = civil.date(y, mo, d) else return civil.datetime(civil.date_from_epoch_day(0), civil.midnight())
+    let Ok(time) = civil.time_of(h, mi, s, 0) else return civil.datetime(day, civil.midnight())
+    civil.datetime(day, time)
+
+fn same(a: CivilDateTime, b: CivilDateTime) -> Bool
+    civil.compare_datetime(a, b) == 0
+
+// The hex of written bytes, or the refusal's message.
+fn hex_of(r: Result<Bytes, AsnEncodeError>) -> Str
+    match r
+        Ok(b)  => bytes.to_hex(b)
+        Err(e) => e.message()
+
+fn dns_of(c: AsnCertificate) -> [Str]
+    match asn1pkix.subject_alt_dns_names(c, asn1read.default_limits())
+        Ok(names) => names
+        Err(e)    => [e.message()]
+
+// An integer's hex with its leading zeros gone, which is how OpenSSL
+// prints a serial number.
+fn trimmed(h: Str) -> Str
+    var s = h
+    while str.len(s) > 2 and str.starts_with(s, "00")
+        s = str.slice(s, 2, str.len(s))
+    s
+
+// An EC P-256 certificate OpenSSL signed for itself.
+fn ec_cert() -> Bytes
+    bytes.from_hex("308202653082020ba00302010202146c3d238eed41e9b1c0ca154d9cbd2297774baf08300a06082a8648ce3d0403023050310b30090603550406130247423111300f060355040a0c0841636d65204c746431183016060355040b0c0f52657365617263682c204e6f7274683114301206035504030c0b6578616d706c652e636f6d301e170d3236303932373135333133305a170d3237313130313135333133305a3050310b30090603550406130247423111300f060355040a0c0841636d65204c746431183016060355040b0c0f52657365617263682c204e6f7274683114301206035504030c0b6578616d706c652e636f6d3059301306072a8648ce3d020106082a8648ce3d0301070342000484276fca1d3c1b6b06d7215bfcb7deb3eb2bab441884d23dba8e5c789c13defe10ef378a776f8d02d9982ee3398ad9bfb1c1e8e97e0c263235cc9bd606bb70d2a381c23081bf301d0603551d0e041604147488a98fd4d64543520765210562d4ef23686900301f0603551d230418301680147488a98fd4d64543520765210562d4ef23686900303a0603551d1104333031820b6578616d706c652e636f6d820f7777772e6578616d706c652e636f6d811161646d696e406578616d706c652e636f6d30120603551d130101ff040830060101ff020101300e0603551d0f0101ff040403020284301d0603551d250416301406082b0601050507030106082b06010505070302300a06082a8648ce3d0403020348003045022100f52d4fa889bfbb227c488dfcd08f4953810c88318bf568fac1de56abf3627f9f0220379ee21fc5a7d37c8597e11d7e5d2e6bdaea6ea2837ab2b95c68e16c8b53e656") ?? bytes.zeros(0)
+
+// Its private key, as PKCS#8.
+fn ec_pkcs8() -> Bytes
+    bytes.from_hex("308187020100301306072a8648ce3d020106082a8648ce3d030107046d306b02010104201e88012bc48293c9367487076015bc34ec376d5d81f3e4a01d090a578ffb5231a1440342000484276fca1d3c1b6b06d7215bfcb7deb3eb2bab441884d23dba8e5c789c13defe10ef378a776f8d02d9982ee3398ad9bfb1c1e8e97e0c263235cc9bd606bb70d2") ?? bytes.zeros(0)
+
+// Its public key, as a SubjectPublicKeyInfo.
+fn ec_spki() -> Bytes
+    bytes.from_hex("3059301306072a8648ce3d020106082a8648ce3d0301070342000484276fca1d3c1b6b06d7215bfcb7deb3eb2bab441884d23dba8e5c789c13defe10ef378a776f8d02d9982ee3398ad9bfb1c1e8e97e0c263235cc9bd606bb70d2") ?? bytes.zeros(0)
+
+// An Ed25519 certificate valid for a hundred years.
+fn ed_cert() -> Bytes
+    bytes.from_hex("3082018430820136a003020102021469666c07bf9a6bf8e12138cf8082f758cae51c9a300506032b657030263111300f06035504030c086465766963652d373111300f060355040a0c0841636d65204c74643020170d3236303932373135333133305a180f32313236303930333135333133305a30263111300f06035504030c086465766963652d373111300f060355040a0c0841636d65204c7464302a300506032b6570032100b8c7e821125324b75fff7fad889e55fe5a974e64f7f73f2b99b3ad771c804903a3743072301d0603551d0e04160414f12197306e15fe86daaa4109dd69eadc962ff597301f0603551d23041830168014f12197306e15fe86daaa4109dd69eadc962ff597300f0603551d130101ff040530030101ff301f0603551d110418301682146465766963652d372e6578616d706c652e636f6d300506032b6570034100736010e03f0b6ef761c593af3fc08ba740e9dbf1b3cad64a8f465c45ae9ebac784822d988ab437678d43d95b903a74cdb54f0f1c063408aef335059b09e02e0f") ?? bytes.zeros(0)
+
+// Its private key, as PKCS#8.
+fn ed_pkcs8() -> Bytes
+    bytes.from_hex("302e020100300506032b657004220420319279c30bd87722dea6e5c37463483bb0fc95dd611b73469d014011bb726b58") ?? bytes.zeros(0)
+
+// Its public key, as a SubjectPublicKeyInfo.
+fn ed_spki() -> Bytes
+    bytes.from_hex("302a300506032b6570032100b8c7e821125324b75fff7fad889e55fe5a974e64f7f73f2b99b3ad771c804903") ?? bytes.zeros(0)
+
+@test
+fn test_ec_cert_walks_as_openssl_asn1parse_reads_it()
+    test.assert_eq(structure(ec_cert()), ["0:0:4:613:c:u16",
+        "4:1:4:523:c:u16",
+        "8:2:2:3:c:c0",
+        "10:3:2:1:p:u2",
+        "13:2:2:20:p:u2",
+        "35:2:2:10:c:u16",
+        "37:3:2:8:p:u6",
+        "47:2:2:80:c:u16",
+        "49:3:2:11:c:u17",
+        "51:4:2:9:c:u16",
+        "53:5:2:3:p:u6",
+        "58:5:2:2:p:u19",
+        "62:3:2:17:c:u17",
+        "64:4:2:15:c:u16",
+        "66:5:2:3:p:u6",
+        "71:5:2:8:p:u12",
+        "81:3:2:24:c:u17",
+        "83:4:2:22:c:u16",
+        "85:5:2:3:p:u6",
+        "90:5:2:15:p:u12",
+        "107:3:2:20:c:u17",
+        "109:4:2:18:c:u16",
+        "111:5:2:3:p:u6",
+        "116:5:2:11:p:u12",
+        "129:2:2:30:c:u16",
+        "131:3:2:13:p:u23",
+        "146:3:2:13:p:u23",
+        "161:2:2:80:c:u16",
+        "163:3:2:11:c:u17",
+        "165:4:2:9:c:u16",
+        "167:5:2:3:p:u6",
+        "172:5:2:2:p:u19",
+        "176:3:2:17:c:u17",
+        "178:4:2:15:c:u16",
+        "180:5:2:3:p:u6",
+        "185:5:2:8:p:u12",
+        "195:3:2:24:c:u17",
+        "197:4:2:22:c:u16",
+        "199:5:2:3:p:u6",
+        "204:5:2:15:p:u12",
+        "221:3:2:20:c:u17",
+        "223:4:2:18:c:u16",
+        "225:5:2:3:p:u6",
+        "230:5:2:11:p:u12",
+        "243:2:2:89:c:u16",
+        "245:3:2:19:c:u16",
+        "247:4:2:7:p:u6",
+        "256:4:2:8:p:u6",
+        "266:3:2:66:p:u3",
+        "334:2:3:194:c:c3",
+        "337:3:3:191:c:u16",
+        "340:4:2:29:c:u16",
+        "342:5:2:3:p:u6",
+        "347:5:2:22:p:u4",
+        "371:4:2:31:c:u16",
+        "373:5:2:3:p:u6",
+        "378:5:2:24:p:u4",
+        "404:4:2:58:c:u16",
+        "406:5:2:3:p:u6",
+        "411:5:2:51:p:u4",
+        "464:4:2:18:c:u16",
+        "466:5:2:3:p:u6",
+        "471:5:2:1:p:u1",
+        "474:5:2:8:p:u4",
+        "484:4:2:14:c:u16",
+        "486:5:2:3:p:u6",
+        "491:5:2:1:p:u1",
+        "494:5:2:4:p:u4",
+        "500:4:2:29:c:u16",
+        "502:5:2:3:p:u6",
+        "507:5:2:22:p:u4",
+        "531:1:2:10:c:u16",
+        "533:2:2:8:p:u6",
+        "543:1:2:72:p:u3"])
+
+@test
+fn test_ec_pkcs8_walks_as_openssl_asn1parse_reads_it()
+    test.assert_eq(structure(ec_pkcs8()), ["0:0:3:135:c:u16",
+        "3:1:2:1:p:u2",
+        "6:1:2:19:c:u16",
+        "8:2:2:7:p:u6",
+        "17:2:2:8:p:u6",
+        "27:1:2:109:p:u4"])
+
+@test
+fn test_ec_spki_walks_as_openssl_asn1parse_reads_it()
+    test.assert_eq(structure(ec_spki()),
+        ["0:0:2:89:c:u16", "2:1:2:19:c:u16", "4:2:2:7:p:u6", "13:2:2:8:p:u6", "23:1:2:66:p:u3"])
+
+@test
+fn test_ed_cert_walks_as_openssl_asn1parse_reads_it()
+    test.assert_eq(structure(ed_cert()), ["0:0:4:388:c:u16",
+        "4:1:4:310:c:u16",
+        "8:2:2:3:c:c0",
+        "10:3:2:1:p:u2",
+        "13:2:2:20:p:u2",
+        "35:2:2:5:c:u16",
+        "37:3:2:3:p:u6",
+        "42:2:2:38:c:u16",
+        "44:3:2:17:c:u17",
+        "46:4:2:15:c:u16",
+        "48:5:2:3:p:u6",
+        "53:5:2:8:p:u12",
+        "63:3:2:17:c:u17",
+        "65:4:2:15:c:u16",
+        "67:5:2:3:p:u6",
+        "72:5:2:8:p:u12",
+        "82:2:2:32:c:u16",
+        "84:3:2:13:p:u23",
+        "99:3:2:15:p:u24",
+        "116:2:2:38:c:u16",
+        "118:3:2:17:c:u17",
+        "120:4:2:15:c:u16",
+        "122:5:2:3:p:u6",
+        "127:5:2:8:p:u12",
+        "137:3:2:17:c:u17",
+        "139:4:2:15:c:u16",
+        "141:5:2:3:p:u6",
+        "146:5:2:8:p:u12",
+        "156:2:2:42:c:u16",
+        "158:3:2:5:c:u16",
+        "160:4:2:3:p:u6",
+        "165:3:2:33:p:u3",
+        "200:2:2:116:c:c3",
+        "202:3:2:114:c:u16",
+        "204:4:2:29:c:u16",
+        "206:5:2:3:p:u6",
+        "211:5:2:22:p:u4",
+        "235:4:2:31:c:u16",
+        "237:5:2:3:p:u6",
+        "242:5:2:24:p:u4",
+        "268:4:2:15:c:u16",
+        "270:5:2:3:p:u6",
+        "275:5:2:1:p:u1",
+        "278:5:2:5:p:u4",
+        "285:4:2:31:c:u16",
+        "287:5:2:3:p:u6",
+        "292:5:2:24:p:u4",
+        "318:1:2:5:c:u16",
+        "320:2:2:3:p:u6",
+        "325:1:2:65:p:u3"])
+
+@test
+fn test_ed_pkcs8_walks_as_openssl_asn1parse_reads_it()
+    test.assert_eq(structure(ed_pkcs8()),
+        ["0:0:2:46:c:u16", "2:1:2:1:p:u2", "5:1:2:5:c:u16", "7:2:2:3:p:u6", "12:1:2:34:p:u4"])
+
+@test
+fn test_ed_spki_walks_as_openssl_asn1parse_reads_it()
+    test.assert_eq(structure(ed_spki()), ["0:0:2:42:c:u16", "2:1:2:5:c:u16", "4:2:2:3:p:u6", "9:1:2:33:p:u3"])
+
+@test
+fn test_ec_cert_fields_match_openssl_x509()
+    match asn1pkix.parse_certificate(ec_cert(), asn1read.default_limits())
+        Err(e) => test.fail(e.message())
+        Ok(c)  =>
+            test.assert_eq(c.version, 3)
+            test.assert_eq(trimmed(bytes.to_hex(c.serial)), trimmed("6c3d238eed41e9b1c0ca154d9cbd2297774baf08"))
+            test.assert_eq(asn1pkix.name_text(c.subject), "CN=example.com,OU=Research\\, North,O=Acme Ltd,C=GB")
+            test.assert_eq(asn1pkix.name_text(c.issuer), "CN=example.com,OU=Research\\, North,O=Acme Ltd,C=GB")
+            test.assert(same(c.not_before, instant(2026, 9, 27, 15, 31, 30)))
+            test.assert(same(c.not_after, instant(2027, 11, 1, 15, 31, 30)))
+            test.assert_eq(c.tbs.off, 4)
+            test.assert_eq(c.tbs.len, 527)
+            test.assert(asn1pkix.algorithms_agree(c))
+            test.assert(asn1pkix.names_encode_equal(ec_cert(), c.subject, ec_cert(), c.issuer))
+            test.assert_eq(dns_of(c), ["example.com", "www.example.com"])
+            test.assert_eq(asn1pkix.unknown_critical_extensions(c).len(), 0)
+            match asn1pkix.basic_constraints(c, asn1read.default_limits())
+                Ok(Some(b)) =>
+                    test.assert(b.is_ca)
+                    test.assert_eq(b.path_len, 1)
+                _           => test.fail("basicConstraints was not read")
+            match asn1pkix.key_usage(c, asn1read.default_limits())
+                Ok(Some(k)) =>
+                    test.assert(asn1univ.bit_at(k, 0))
+                    test.assert(asn1univ.bit_at(k, 5))
+                    test.assert(not asn1univ.bit_at(k, 1))
+                _           => test.fail("keyUsage was not read")
+            match asn1pkix.ext_key_usage_oids(c, asn1read.default_limits())
+                Ok(os) =>
+                    var texts: [Str] = []
+                    for o in os
+                        list.push(texts, asn1oid.oid_text(o))
+                    test.assert_eq(texts, ["1.3.6.1.5.5.7.3.1", "1.3.6.1.5.5.7.3.2"])
+                Err(e) => test.fail(e.message())
+            match asn1pkix.ec_public_key_point(c.public_key)
+                Ok(pt) => test.assert_eq(bytes.to_hex(pt),
+                    "0484276fca1d3c1b6b06d7215bfcb7deb3eb2bab441884d23dba8e5c789c13defe10ef378a776f8d02d9982ee3398ad9bfb1c1e8e97e0c263235cc9bd606bb70d2")
+                Err(e) => test.fail(e.message())
+            match asn1pkix.signature_bytes(c)
+                Ok(sig) =>
+                    match asn1pkix.ecdsa_signature_rs(sig, 32, asn1read.default_limits())
+                        Ok(p)  =>
+                            test.assert_eq(bytes.to_hex(p.r),
+                                "f52d4fa889bfbb227c488dfcd08f4953810c88318bf568fac1de56abf3627f9f")
+                            test.assert_eq(bytes.to_hex(p.s),
+                                "379ee21fc5a7d37c8597e11d7e5d2e6bdaea6ea2837ab2b95c68e16c8b53e656")
+                            test.assert_eq(hex_of(asn1pkix.ecdsa_signature_der(p.r, p.s)), bytes.to_hex(sig))
+                        Err(e) => test.fail(e.message())
+                Err(e)  => test.fail(e.message())
+
+@test
+fn test_ed_cert_fields_match_openssl_x509()
+    match asn1pkix.parse_certificate(ed_cert(), asn1read.default_limits())
+        Err(e) => test.fail(e.message())
+        Ok(c)  =>
+            test.assert_eq(c.version, 3)
+            test.assert_eq(trimmed(bytes.to_hex(c.serial)), trimmed("69666c07bf9a6bf8e12138cf8082f758cae51c9a"))
+            test.assert_eq(asn1pkix.name_text(c.subject), "O=Acme Ltd,CN=device-7")
+            test.assert_eq(asn1pkix.name_text(c.issuer), "O=Acme Ltd,CN=device-7")
+            test.assert(same(c.not_before, instant(2026, 9, 27, 15, 31, 30)))
+            test.assert(same(c.not_after, instant(2126, 9, 3, 15, 31, 30)))
+            test.assert_eq(c.tbs.off, 4)
+            test.assert_eq(c.tbs.len, 314)
+            test.assert(asn1pkix.algorithms_agree(c))
+            test.assert(asn1pkix.names_encode_equal(ed_cert(), c.subject, ed_cert(), c.issuer))
+            test.assert_eq(dns_of(c), ["device-7.example.com"])
+            match asn1pkix.ed25519_public_key(c.public_key)
+                Ok(k)  => test.assert_eq(bytes.to_hex(k),
+                    "b8c7e821125324b75fff7fad889e55fe5a974e64f7f73f2b99b3ad771c804903")
+                Err(e) => test.fail(e.message())
+
+@test
+fn test_the_keys_match_openssl_pkey_and_write_back_byte_for_byte()
+    let lim = asn1read.default_limits()
+    match asn1pkix.parse_spki(ec_spki(), lim)
+        Ok(k)  => test.assert_eq(hex_of(asn1pkix.write_spki(k)), bytes.to_hex(ec_spki()))
+        Err(e) => test.fail(e.message())
+    match asn1pkix.parse_spki(ed_spki(), lim)
+        Ok(k)  => test.assert_eq(hex_of(asn1pkix.write_spki(k)), bytes.to_hex(ed_spki()))
+        Err(e) => test.fail(e.message())
+    match asn1pkix.parse_pkcs8(ec_pkcs8(), lim)
+        Ok(k)  =>
+            test.assert_eq(hex_of(asn1pkix.write_pkcs8(k)), bytes.to_hex(ec_pkcs8()))
+            match asn1pkix.ec_private_key_scalar(k)
+                Ok(d)  => test.assert_eq(bytes.to_hex(d),
+                    "1e88012bc48293c9367487076015bc34ec376d5d81f3e4a01d090a578ffb5231")
+                Err(e) => test.fail(e.message())
+        Err(e) => test.fail(e.message())
+    match asn1pkix.parse_pkcs8(ed_pkcs8(), lim)
+        Ok(k)  =>
+            test.assert_eq(hex_of(asn1pkix.write_pkcs8(k)), bytes.to_hex(ed_pkcs8()))
+            match asn1pkix.ed25519_seed(k)
+                Ok(d)  => test.assert_eq(bytes.to_hex(d),
+                    "319279c30bd87722dea6e5c37463483bb0fc95dd611b73469d014011bb726b58")
+                Err(e) => test.fail(e.message())
+        Err(e) => test.fail(e.message())

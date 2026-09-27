@@ -1,0 +1,615 @@
+// edges_tests.nv — the refusals, the BER forms, the feeding reader one
+// byte at a time, and every message.
+//
+// The API suite states the rules on the common case, and the OpenSSL
+// suite reads real documents.  This suite reaches what both leave out:
+// each refusal by its own name, an indefinite length read by offset and
+// by feeding, and the writer's refusals.
+
+use std.test
+use std.bytes
+use std.str
+use asn1tag
+use asn1read
+use asn1univ
+use asn1oid
+use asn1write
+use asn1pkix
+use asn1err
+use civil
+
+fn hex(h: Str) -> Bytes
+    bytes.from_hex(h) ?? bytes.zeros(0)
+
+fn der() -> AsnLimits
+    asn1read.default_limits()
+
+fn ber() -> AsnLimits
+    asn1read.ber_limits()
+
+// The refusal a read answered, or a failure when it answered a value.
+fn refusal<T>(r: Result<T, AsnDecodeError>) -> AsnDecodeError
+    match r
+        Ok(_)  =>
+            test.fail("a refusal was expected")
+            AsnTruncated(-1, -1)
+        Err(e) => e
+
+fn write_refusal(r: Result<Int, AsnEncodeError>) -> AsnEncodeError
+    match r
+        Ok(_)  =>
+            test.fail("a refusal was expected")
+            AsnNothingOpen
+        Err(e) => e
+
+fn build_refusal(r: Result<AsnBuilder, AsnEncodeError>) -> AsnEncodeError
+    match r
+        Ok(_)  =>
+            test.fail("a refusal was expected")
+            AsnNothingOpen
+        Err(e) => e
+
+fn ok_b(r: Result<AsnBuilder, AsnEncodeError>) -> AsnBuilder
+    match r
+        Ok(b)  => b
+        Err(e) =>
+            test.fail(e.message())
+            asn1write.builder(asn1write.build_limits())
+
+fn ok_out(r: Result<Bytes, AsnEncodeError>) -> Bytes
+    match r
+        Ok(b)  => bytes.clone(b)
+        Err(e) =>
+            test.fail(e.message())
+            bytes.zeros(0)
+
+fn buffer(n: Int) -> Cursor
+    bytes.cursor_be(bytes.zeros(n))
+
+// ── asn1tag ─────────────────────────────────────────────────────────
+
+@test
+fn test_a_high_tag_number_scans_and_emits_across_bytes()
+    // `9f 81 00 01 05` — context, primitive, tag 128, one byte of content.
+    var h = asn1tag.head_scan()
+    for b in [0x9f, 0x81, 0x00, 0x01]
+        h = asn1tag.head_push(h, b as u8)
+    test.assert(h.done)
+    test.assert_eq(h.tag, 128)
+    test.assert_eq(h.len, 1)
+    test.assert_eq(asn1tag.head_need(h), 0)
+    test.assert_eq(asn1tag.head_push(h, 0x05 as u8).seen, 4)
+    let e = asn1tag.emit_identifier(asn1tag.class_context(), false, 128)
+    test.assert_eq(e.len, 3)
+    test.assert_eq(e.out[0] as Int, 0x9f)
+    test.assert_eq(e.out[1] as Int, 0x81)
+    test.assert_eq(e.out[2] as Int, 0x00)
+
+@test
+fn test_a_bad_high_tag_and_a_bad_scan_stay_bad()
+    // A padded first byte, and a number below 31 in the high form.
+    var h = asn1tag.head_push(asn1tag.head_scan(), 0x1f as u8)
+    h = asn1tag.head_push(h, 0x80 as u8)
+    test.assert(h.bad)
+    test.assert(asn1tag.head_push(h, 0x01 as u8).bad)
+    var low = asn1tag.head_push(asn1tag.head_scan(), 0x1f as u8)
+    test.assert(asn1tag.head_push(low, 0x05 as u8).bad)
+
+@test
+fn test_the_emitters_refuse_what_cannot_be_written()
+    test.assert(not asn1tag.emit_identifier(4, false, 1).ok)
+    test.assert(not asn1tag.emit_length(-1).ok)
+    test.assert(not asn1tag.emit_arc(-1).ok)
+    let a = asn1tag.arc_push(asn1tag.arc_scan(), 0x05 as u8)
+    test.assert_eq(asn1tag.arc_push(a, 0x06 as u8).acc, 5)
+
+// ── asn1read ────────────────────────────────────────────────────────
+
+@test
+fn test_each_header_refusal_names_its_rule()
+    test.assert_eq(refusal(asn1read.header_at(hex("30ff"), 0, der())), AsnReservedLengthForm(1))
+    test.assert_eq(refusal(asn1read.header_at(hex("3082"), 0, der())), AsnTruncated(2, 2))
+    test.assert_eq(refusal(asn1read.header_at(hex("30890100000000000000000000"), 0, der())),
+        AsnLengthNotRepresentable(1))
+    test.assert_eq(refusal(asn1read.header_at(hex("1f05"), 0, der())), AsnBadTagNumber(0))
+    test.assert_eq(refusal(asn1read.header_at(hex("1f8001"), 0, der())), AsnBadTagNumber(1))
+    test.assert_eq(refusal(asn1read.header_at(hex("1f81"), 0, der())), AsnTruncated(2, 1))
+    test.assert_eq(refusal(asn1read.header_at(hex("0484ffffffff"), 0, der())),
+        AsnDocumentTooLarge(0, 4294967295, 16777216))
+    test.assert_eq(refusal(asn1read.header_at(hex("0580"), 0, ber())), AsnIndefiniteLength(1))
+    test.assert_eq(refusal(asn1read.header_at(hex("30"), 5, der())), AsnTruncated(5, 1))
+
+@test
+fn test_the_tolerant_reader_takes_the_long_form_and_the_indefinite_length()
+    match asn1read.header_at(hex("308103020107"), 0, ber())
+        Ok(h)  => test.assert_eq(h.length, 3)
+        Err(e) => test.fail(e.message())
+    // `30 80 02 01 07 00 00`: a SEQUENCE of indefinite length.
+    let doc = hex("30800201070000")
+    match asn1read.header_at(doc, 0, ber())
+        Ok(h)  =>
+            test.assert(h.indefinite)
+            test.assert_eq(h.length, -1)
+        Err(e) => test.fail(e.message())
+    match asn1read.value_span_at(doc, 0, ber())
+        Ok(s)  => test.assert_eq(s.len, 7)
+        Err(e) => test.fail(e.message())
+    match asn1read.content_span_at(doc, 0, ber())
+        Ok(s)  => test.assert_eq(s.len, 3)
+        Err(e) => test.fail(e.message())
+    match asn1read.children_at(doc, 0, ber())
+        Ok(kids) => test.assert_eq(list.len(kids), 1)
+        Err(e)   => test.fail(e.message())
+    match asn1read.read_document(doc, ber())
+        Ok(s)  => test.assert_eq(s.len, 7)
+        Err(e) => test.fail(e.message())
+    test.assert_eq(refusal(asn1read.value_span_at(hex("3080020107"), 0, ber())), AsnTruncated(5, 2))
+
+@test
+fn test_the_depth_bound_holds_by_offset_and_by_feeding()
+    let deep = AsnLimits { max_depth: 2, max_length: 1000, ber_tolerant: true }
+    // Three SEQUENCEs, one inside the other.
+    let nested = hex("3004300230000000")
+    test.assert_eq(refusal(asn1read.read_document(hex("300430023000"), deep)), AsnDepthExceeded(4, 2))
+    test.assert_eq(refusal(asn1read.walk(hex("300430023000"), deep)), AsnDepthExceeded(4, 2))
+    test.assert_eq(refusal(asn1read.value_span_at(hex("30803080308000000000"), 0, deep)),
+        AsnDepthExceeded(4, 2))
+    test.assert_eq(asn1err.decode_offset(refusal(asn1read.read_document(nested, deep))), 4)
+
+@test
+fn test_a_child_that_runs_past_its_parent_is_refused()
+    // `30 03 02 02 07 08`: the INTEGER claims two bytes where one is left.
+    let bad = hex("300302020708")
+    test.assert_eq(refusal(asn1read.children_at(bad, 0, der())), AsnLengthOverrun(2, 4, 3))
+    test.assert_eq(refusal(asn1read.read_document(bad, der())), AsnLengthOverrun(2, 4, 3))
+    test.assert_eq(refusal(asn1read.walk(bad, der())), AsnLengthOverrun(2, 2, 1))
+
+@test
+fn test_the_tag_expectations_refuse_the_wrong_shape()
+    // A primitive SEQUENCE, a constructed INTEGER, a context tag that is
+    // not the one asked for, and an explicit tag holding two values.
+    test.assert_eq(refusal(asn1read.expect_at(hex("1000"), 0, 16, der())), AsnWrongConstruction(0, false))
+    test.assert_eq(refusal(asn1read.expect_at(hex("2200"), 0, 2, der())), AsnWrongConstruction(0, true))
+    test.assert_eq(refusal(asn1read.expect_context_at(hex("a100"), 0, 0, der())), AsnUnexpectedTag(0, 0, 1))
+    test.assert_eq(refusal(asn1read.explicit_at(hex("800107"), 0, 0, der())), AsnWrongConstruction(0, false))
+    test.assert_eq(refusal(asn1read.explicit_at(hex("a006020107020108"), 0, 0, der())),
+        AsnTrailingBytes(5, 3))
+
+@test
+fn test_the_classes_are_read_from_the_top_two_bits()
+    match asn1read.peek_tag_at(hex("4100"), 0, der())
+        Ok(t)  => test.assert(t.class == AsnApplication)
+        Err(e) => test.fail(e.message())
+    match asn1read.peek_tag_at(hex("c100"), 0, der())
+        Ok(t)  => test.assert(t.class == AsnPrivate)
+        Err(e) => test.fail(e.message())
+    // The feeding reader carries each class through its own stack.
+    match asn1read.walk(hex("6104e3020500"), der())
+        Ok(evs) =>
+            match evs[4]
+                AsnConstructedEnd(t, _) => test.assert(t.class == AsnApplication)
+                _                       => test.fail("expected an end")
+        Err(e)  => test.fail(e.message())
+
+// Feed a document one byte at a time and collect every event.
+fn trickle(doc: Bytes, limits: AsnLimits) -> Result<[AsnEvent], AsnDecodeError>
+    var r = asn1read.reader(limits)
+    var events: [AsnEvent] = []
+    for b in bytes.to_byte_list(doc)
+        let s = asn1read.feed(r, [b])!
+        list.append(events, s.events)
+        r = s.reader
+    let end = asn1read.finish(r)!
+    list.append(events, end.events)
+    Ok(events)
+
+@test
+fn test_feeding_one_byte_at_a_time_gives_the_events_walking_gives()
+    for h in ["3003020107",
+    "30800201070000",
+    "3080308002010700000000",
+    "a003020107",
+    "04820100" + str_zeros(256)]
+        let doc = hex(h)
+        let Ok(fed) = trickle(doc, ber()) else return test.fail("${h} did not feed")
+        let Ok(walked) = asn1read.walk(doc, ber()) else return test.fail("${h} did not walk")
+        test.assert_eq(list.len(fed), list.len(walked))
+
+fn str_zeros(n: Int) -> Str
+    var s = ""
+    for _ in 0..n
+        s = s + "00"
+    s
+
+@test
+fn test_the_feeding_reader_refuses_what_the_offset_reader_refuses()
+    test.assert_eq(refusal(asn1read.walk(hex("0000"), der())), AsnStrayEndOfContents(0))
+    test.assert_eq(refusal(asn1read.walk(hex("020107020108"), der())), AsnTrailingBytes(3, 3))
+    test.assert_eq(refusal(asn1read.walk(hex("3003"), der())), AsnTruncated(2, 1))
+    test.assert_eq(refusal(asn1read.walk(hex("30030201"), der())), AsnTruncated(4, 1))
+    test.assert_eq(refusal(asn1read.walk(hex("30ff"), der())), AsnReservedLengthForm(1))
+    match asn1read.feed(asn1read.reader(der()), bytes.to_byte_list(hex("300502")))
+        Ok(s)  =>
+            test.assert_eq(s.need, 1)
+            test.assert_eq(asn1read.pending_len(s.reader), 1)
+            test.assert_eq(asn1read.offset(s.reader), 2)
+        Err(e) => test.fail(e.message())
+
+// A source that answers one chunk, then the end of the stream.
+struct OneChunk
+    data: Bytes
+
+impl Read[] for OneChunk
+    fn read(self, n: Int) -> Result<Bytes, IoError> []
+        if bytes.len(self.data) == 0
+            return Err(IoClosed)
+        Ok(bytes.clone(self.data))
+
+// A source whose stream fails.
+struct Broken
+    at: Int
+
+impl Read[] for Broken
+    fn read(self, n: Int) -> Result<Bytes, IoError> []
+        Err(IoNotFound)
+
+@test
+fn test_drain_reads_a_source_to_its_end_within_a_limit()
+    let r = asn1read.reader(der())
+    test.assert_eq(refusal(asn1read.drain(r, OneChunk { data: hex("3003020107") }, 4)),
+        AsnDocumentTooLarge(0, 5, 4))
+    test.assert_eq(refusal(asn1read.drain(r, Broken { at: 0 }, 100)), AsnTruncated(0, 1))
+    match asn1read.drain(r, OneChunk { data: bytes.zeros(0) }, 100)
+        Ok(s)  => test.assert_eq(list.len(s.events), 0)
+        Err(e) => test.fail(e.message())
+
+// ── asn1univ ────────────────────────────────────────────────────────
+
+@test
+fn test_the_universal_refusals()
+    test.assert_eq(refusal(asn1univ.boolean_at(hex("010200ff"), 0, der())), AsnBadBoolean(2, -1))
+    match asn1univ.boolean_at(hex("010101"), 0, ber())
+        Ok(v)  => test.assert(v)
+        Err(e) => test.fail(e.message())
+    test.assert_eq(refusal(asn1univ.integer_at(hex("0200"), 0, der())), AsnTruncated(2, 1))
+    test.assert(asn1err.is_der_only(AsnBadBoolean(2, 1)))
+    test.assert_eq(refusal(asn1univ.bit_string_at(hex("0300"), 0, der())), AsnBadBitString(2, -1))
+    test.assert_eq(refusal(asn1univ.bit_string_at(hex("030101"), 0, der())), AsnBadBitString(2, 1))
+    test.assert_eq(refusal(asn1univ.oid_at(hex("06022a86"), 0, der())), AsnBadOid(3))
+    match asn1univ.printable_string_at(hex("130161"), 0, der())
+        Ok(v)  => test.assert_eq(v, "a")
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_integers_of_several_bytes_both_signs()
+    match asn1univ.integer_at(hex("02020100"), 0, der())
+        Ok(n)  => test.assert_eq(n, 256)
+        Err(e) => test.fail(e.message())
+    match asn1univ.integer_at(hex("0201ff"), 0, der())
+        Ok(n)  => test.assert_eq(n, -1)
+        Err(e) => test.fail(e.message())
+    match asn1univ.integer_at(hex("02088000000000000000"), 0, der())
+        Ok(n)  => test.assert_eq(n, 0 - 9223372036854775807 - 1)
+        Err(e) => test.fail(e.message())
+    // BER leaves a redundant leading byte in, and it does not count.
+    match asn1univ.integer_at(hex("020a00007fffffffffffffff"), 0, ber())
+        Ok(n)  => test.assert_eq(n, 9223372036854775807)
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_the_string_alphabets_are_checked_byte_by_byte()
+    test.assert_eq(refusal(asn1univ.printable_string_at(hex("130140"), 0, der())), AsnBadStringBytes(2, 64))
+    test.assert_eq(refusal(asn1univ.ia5_string_at(hex("160180"), 0, der())), AsnBadStringBytes(2, 128))
+    match asn1univ.any_string_at(hex("16026869"), 0, der())
+        Ok(s)  => test.assert_eq(s, "hi")
+        Err(e) => test.fail(e.message())
+    // "é" is two bytes, and "€" three.
+    match asn1univ.utf8_string_at(hex("0c05c3a9e282ac"), 0, der())
+        Ok(s)  => test.assert_eq(s, "é€")
+        Err(e) => test.fail(e.message())
+    // A lone continuation byte, an overlong form, a truncated sequence,
+    // and a bad continuation.
+    test.assert_eq(refusal(asn1univ.utf8_string_at(hex("0c0180"), 0, der())), AsnBadStringBytes(2, 128))
+    test.assert_eq(refusal(asn1univ.utf8_string_at(hex("0c02e080"), 0, der())), AsnBadStringBytes(2, 224))
+    test.assert_eq(refusal(asn1univ.utf8_string_at(hex("0c03e080af"), 0, der())), AsnBadStringBytes(3, 128))
+    test.assert_eq(refusal(asn1univ.utf8_string_at(hex("0c03e2822c"), 0, der())), AsnBadStringBytes(4, 44))
+    match asn1univ.utf8_string_at(hex("0c04f09f9880"), 0, der())
+        Ok(v)  => test.assert_eq(str.len(v), 4)
+        Err(e) => test.fail(e.message())
+    test.assert(not asn1univ.is_ia5_string("é"))
+
+@test
+fn test_the_time_grammar_is_checked_before_the_calendar()
+    // Too short, not digits, the 31st of February, a byte above 0x7f.
+    test.assert_eq(refusal(asn1univ.utc_time_at(text_der(23, "2609110000Z"), 0, der())),
+        AsnBadTime(2, "2609110000Z"))
+    test.assert_eq(refusal(asn1univ.utc_time_at(text_der(23, "2609110000x0Z"), 0, der())),
+        AsnBadTime(2, "2609110000x0Z"))
+    test.assert_eq(refusal(asn1univ.utc_time_at(text_der(23, "260231000000Z"), 0, der())),
+        AsnBadTime(2, "260231000000Z"))
+    test.assert_eq(refusal(asn1univ.utc_time_at(hex("170180"), 0, der())), AsnBadStringBytes(2, 128))
+    test.assert_eq(refusal(asn1univ.utc_time_at(text_der(23, "260101250000Z"), 0, der())),
+        AsnBadTime(2, "260101250000Z"))
+    test.assert_eq(refusal(asn1univ.generalized_time_at(text_der(24, "20260911000x00Z"), 0, der())),
+        AsnBadTime(2, "20260911000x00Z"))
+
+@test
+fn test_a_generalized_time_fraction_follows_der()
+    // A quarter of a second past midnight.
+    match asn1univ.generalized_time_at(text_der(24, "20260911000000.25Z"), 0, der())
+        Ok(t)  => test.assert_eq(t.time.nano, 250000000)
+        Err(e) => test.fail(e.message())
+    // A trailing zero and a bare point are second encodings of a time.
+    for t in ["20260911000000.20Z", "20260911000000.Z", "20260911000000,5Z", "2026091100000Z"]
+        test.assert_eq(refusal(asn1univ.generalized_time_at(text_der(24, t), 0, der())), AsnBadTime(2, t))
+
+// A primitive universal value of this tag holding this text.
+fn text_der(tag: Int, text: Str) -> Bytes
+    bytes.concat([bytes.from_byte_list([tag, str.len(text)]), bytes.from_str(text)])
+
+@test
+fn test_a_set_of_out_of_order_is_accepted_when_tolerant()
+    match asn1univ.set_of_at(hex("3106020108020107"), 0, ber())
+        Ok(kids) => test.assert_eq(list.len(kids), 2)
+        Err(e)   => test.fail(e.message())
+
+// ── asn1oid ─────────────────────────────────────────────────────────
+
+@test
+fn test_the_oid_rules_refuse_by_name()
+    test.assert(asn1oid.oid_of_text("1.02") == None)
+    test.assert(asn1oid.oid_of_text("1..2") == None)
+    test.assert(asn1oid.oid_of_text("1.99999999999999999999") == None)
+    test.assert(not asn1oid.starts_with(asn1oid.oid([1, 2]), asn1oid.oid([1, 2, 3])))
+    test.assert_eq(refusal(asn1oid.decode(bytes.zeros(0))), AsnBadOid(0))
+    test.assert_eq(refusal(asn1oid.decode(hex("2a80"))), AsnBadOid(1))
+    match asn1oid.encoded_len(asn1oid.oid([1, -2]))
+        Ok(_)  => test.fail("a negative arc was encoded")
+        Err(e) => test.assert_eq(e, AsnNegativeValue("arc"))
+    match asn1oid.encoded_len(asn1oid.oid([3, 1]))
+        Ok(_)  => test.fail("a first arc of 3 was encoded")
+        Err(e) => test.assert_eq(e, AsnBadOidArcs("a first arc above 2"))
+    match asn1oid.encoded_len(asn1oid.oid([1, 40]))
+        Ok(_)  => test.fail("1.40 was encoded")
+        Err(e) => test.assert_eq(e, AsnBadOidArcs("a second arc above 39 under a first arc of 1"))
+    match asn1oid.encoded_len(asn1oid.oid([2, 9223372036854775800]))
+        Ok(_)  => test.fail("an arc too large to pack was encoded")
+        Err(e) => test.assert_eq(e, AsnBadOidArcs("a second arc too large to pack"))
+    test.assert_eq(write_refusal(asn1oid.encode_into(asn1oid.oid_ec_public_key(), buffer(3))),
+        AsnBufferTooSmall(7, 3))
+    match asn1oid.decode(hex("883703"))
+        Ok(o)  => test.assert_eq(asn1oid.oid_text(o), "2.999.3")
+        Err(e) => test.fail(e.message())
+
+// ── asn1write ───────────────────────────────────────────────────────
+
+@test
+fn test_the_writers_refuse_what_der_cannot_hold()
+    test.assert_eq(write_refusal(asn1write.write_header_into(-1, false, 0, buffer(8))),
+        AsnNegativeValue("tag number"))
+    test.assert_eq(write_refusal(asn1write.write_header_into(2, false, -1, buffer(8))),
+        AsnNegativeValue("length"))
+    test.assert_eq(write_refusal(asn1write.write_context_header_into(-1, false, 0, buffer(8))),
+        AsnNegativeValue("tag number"))
+    test.assert_eq(write_refusal(asn1write.write_context_header_into(0, false, -1, buffer(8))),
+        AsnNegativeValue("length"))
+    test.assert_eq(write_refusal(asn1write.write_tlv_into(-1, bytes.zeros(0), buffer(8))),
+        AsnNegativeValue("tag number"))
+    test.assert_eq(write_refusal(asn1write.write_bit_string_into(8, bytes.zeros(1), buffer(8))),
+        AsnBadUnusedBits(8))
+    test.assert_eq(write_refusal(asn1write.write_bit_string_into(1, bytes.zeros(0), buffer(8))),
+        AsnBadUnusedBits(1))
+    test.assert_eq(write_refusal(asn1write.write_ia5_string_into("é", buffer(8))), AsnStringNotAllowed(22, 0))
+    test.assert_eq(write_refusal(asn1write.write_explicit_into(-1, bytes.zeros(0), buffer(8))),
+        AsnNegativeValue("tag number"))
+    test.assert_eq(write_refusal(asn1write.write_implicit_into(-1, false, hex("020107"), buffer(8))),
+        AsnNegativeValue("tag number"))
+    test.assert_eq(write_refusal(asn1write.write_implicit_into(0, false, hex("0201"), buffer(8))),
+        AsnNotOneValue(2))
+    test.assert_eq(write_refusal(asn1write.write_implicit_into(0, false, hex("0201070201"), buffer(8))),
+        AsnNotOneValue(5))
+
+@test
+fn test_the_writers_produce_der_byte_for_byte()
+    var c = buffer(64)
+    let _ = asn1write.write_integer_into(-129, c)
+    let _ = asn1write.write_integer_into(128, c)
+    let _ = asn1write.write_implicit_into(1, false, hex("020107"), c)
+    match civil.date(2026, 9, 11)
+        Ok(d)  =>
+            let _ = asn1write.write_generalized_time_into(civil.datetime(d, civil.midnight()), c)
+        Err(e) => test.fail(e.message())
+    let out = bytes.to_hex(bytes.slice(c.finish(), 0, 28))
+    test.assert_eq(out, "0202ff7f" + "02020080" + "810107" + "180f32303236303931313030303030305a")
+    match civil.date(10000, 1, 1)
+        Ok(d)  =>
+            test.assert_eq(write_refusal(asn1write.write_generalized_time_into(civil.datetime(d, civil.midnight()),
+                                                                              buffer(32))),
+                AsnTimeNotWritable(10000))
+        Err(_) => test.assert(true)
+
+@test
+fn test_the_builder_sorts_a_set_of_and_chooses_the_time_type()
+    var b = asn1write.builder(asn1write.build_limits())
+    b = ok_b(asn1write.begin_set_of(b))
+    b = ok_b(asn1write.put_integer(b, 8))
+    b = ok_b(asn1write.put_integer(b, 7))
+    b = ok_b(asn1write.put_encoded(b, hex("ff")))
+    b = ok_b(asn1write.end(b))
+    match asn1write.done(b)
+        Ok(out) => test.assert_eq(bytes.to_hex(out), "3107020107020108ff")
+        Err(e)  => test.fail(e.message())
+    match civil.date(2050, 1, 1)
+        Ok(d)  =>
+            let t = civil.datetime(d, civil.midnight())
+            match asn1write.put_time(asn1write.builder(asn1write.build_limits()), t)
+                Ok(g)  => test.assert_eq(asn1write.builder_len(g), 17)
+                Err(e) => test.fail(e.message())
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_the_builder_refuses_by_name()
+    let tight = AsnBuildLimits { max_depth: 1, max_length: 4 }
+    let b = asn1write.builder(tight)
+    test.assert_eq(build_refusal(asn1write.end(b)), AsnNothingOpen)
+    test.assert_eq(build_refusal(asn1write.begin_explicit(b, -1)), AsnNegativeValue("tag number"))
+    match asn1write.begin_sequence(b)
+        Ok(one) => test.assert_eq(build_refusal(asn1write.begin_sequence(one)), AsnEncodeDepthExceeded(1))
+        Err(e)  => test.fail(e.message())
+    test.assert_eq(build_refusal(asn1write.put_octet_string(b, bytes.zeros(3))), AsnBufferTooSmall(5, 4))
+
+// ── asn1pkix ────────────────────────────────────────────────────────
+
+// A SEQUENCE around whatever it is handed, written by the builder.
+fn seq(parts: [Bytes]) -> Bytes
+    var b = asn1write.builder(asn1write.build_limits())
+    b = ok_b(asn1write.begin_sequence(b))
+    for p in parts
+        b = ok_b(asn1write.put_encoded(b, p))
+    b = ok_b(asn1write.end(b))
+    ok_out(asn1write.done(b))
+
+fn oid_der(o: AsnOid) -> Bytes
+    var b = asn1write.builder(asn1write.build_limits())
+    b = ok_b(asn1write.put_oid(b, o))
+    ok_out(asn1write.done(b))
+
+fn int_der(v: Int) -> Bytes
+    var b = asn1write.builder(asn1write.build_limits())
+    b = ok_b(asn1write.put_integer(b, v))
+    ok_out(asn1write.done(b))
+
+// A version 1 certificate with no extensions: no `[0]` version and no
+// `[3]` field.
+fn v1_certificate() -> Bytes
+    let alg = seq([oid_der(asn1oid.oid_ed25519())])
+    let name = seq([hex("310b300906035504061302" + "4742")])
+    let validity = seq([hex("170d3236303130313030303030305a"), hex("180f32303530303130313030303030305a")])
+    let spki = seq([alg, hex("030300" + "0102")])
+    let tbs = seq([int_der(1), alg, name, validity, name, spki])
+    seq([tbs, alg, hex("030300" + "0102")])
+
+@test
+fn test_a_version_1_certificate_has_no_extensions()
+    match asn1pkix.parse_certificate(v1_certificate(), der())
+        Ok(c)  =>
+            test.assert_eq(c.version, 1)
+            test.assert_eq(list.len(c.extensions), 0)
+            test.assert_eq(asn1pkix.name_text(c.subject), "C=GB")
+            match asn1pkix.subject_alt_dns_names(c, der())
+                Ok(ns) => test.assert_eq(list.len(ns), 0)
+                Err(e) => test.fail(e.message())
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_the_structures_refuse_what_is_missing_or_extra()
+    let alg = seq([oid_der(asn1oid.oid_ed25519())])
+    test.assert_eq(refusal(asn1pkix.algorithm_at(seq([]), 0, der())), AsnMissingField(0, "algorithm"))
+    test.assert_eq(refusal(asn1pkix.algorithm_at(seq([oid_der(asn1oid.oid_ed25519()), hex("0500"), hex("0500")]), 0,
+                                                 der())),
+        AsnTrailingBytes(9, 2))
+    test.assert_eq(refusal(asn1pkix.spki_at(seq([alg]), 0, der())), AsnMissingField(0, "subjectPublicKey"))
+    test.assert_eq(refusal(asn1pkix.parse_pkcs8(seq([int_der(2), alg, hex("0400")]), der())),
+        AsnUnsupportedVersion(2, 2))
+    test.assert_eq(refusal(asn1pkix.parse_certificate(seq([seq([int_der(1)]), alg, hex("030100")]), der())),
+        AsnMissingField(2, "signature"))
+    let v9 = seq([seq([hex("a003020108"), int_der(1)]), alg, hex("030100")])
+    test.assert_eq(refusal(asn1pkix.parse_certificate(v9, der())), AsnUnsupportedVersion(4, 9))
+    test.assert_eq(refusal(asn1pkix.ecdsa_signature_rs(seq([int_der(1), int_der(2), int_der(3)]), 32, der())),
+        AsnTrailingBytes(8, 3))
+    test.assert_eq(refusal(asn1pkix.ecdsa_signature_rs(seq([hex("0203010000"), int_der(2)]), 2, der())),
+        AsnIntegerTooLarge(2, 3))
+
+@test
+fn test_pkcs8_attributes_are_kept_whole_and_written_back()
+    let alg = seq([oid_der(asn1oid.oid_ed25519())])
+    let doc = seq([int_der(0), alg, bytes.concat([hex("04220420"), bytes.zeros(32)]),
+                   hex("a0023000")])
+    match asn1pkix.parse_pkcs8(doc, der())
+        Ok(k)  =>
+            match k.attributes
+                Some(a) => test.assert_eq(bytes.to_hex(a), "a0023000")
+                None    => test.fail("the attributes were dropped")
+            match asn1pkix.write_pkcs8(k)
+                Ok(out) => test.assert_eq(bytes.to_hex(out), bytes.to_hex(doc))
+                Err(e)  => test.fail(e.message())
+        Err(e) => test.fail(e.message())
+
+fn cert_with(extensions: [AsnExtension], outer: AsnAlgorithmId) -> AsnCertificate
+    let none = AsnName { rdns: [], span: AsnSpan { off: 0, len: 0 } }
+    let t = civil.datetime(civil.date_from_epoch_day(0), civil.midnight())
+    AsnCertificate { version: 3, serial: bytes.zeros(1),
+                     signature_algorithm: AsnAlgorithmId { algorithm: asn1oid.oid_ed25519(), parameters: Some(hex("0500")) },
+                     issuer: none, subject: none, not_before: t, not_after: t,
+                     public_key: AsnSubjectPublicKeyInfo {
+                         algorithm: AsnAlgorithmId { algorithm: asn1oid.oid_ed25519(), parameters: None },
+                         public_key: AsnBitString { unused_bits: 0, data: bytes.zeros(32) } },
+                     extensions: extensions, outer_algorithm: outer,
+                     signature: AsnBitString { unused_bits: 0, data: bytes.zeros(64) }, tbs: AsnSpan { off: 0, len: 0 } }
+
+@test
+fn test_the_accessors_over_hand_made_extensions()
+    let odd = AsnExtension { oid: asn1oid.oid([1, 2, 3]), critical: true, value: hex("0500") }
+    let san = AsnExtension { oid: asn1oid.oid_subject_alt_name(), critical: false, value: hex("30038201ff") }
+    let c = cert_with([odd, san], AsnAlgorithmId { algorithm: asn1oid.oid_ed25519(), parameters: Some(hex("0500")) })
+    test.assert_eq(list.len(asn1pkix.unknown_critical_extensions(c)), 1)
+    test.assert(asn1pkix.algorithms_agree(c))
+    test.assert_eq(refusal(asn1pkix.subject_alt_dns_names(c, der())), AsnBadStringBytes(4, 255))
+    let other = cert_with([], AsnAlgorithmId { algorithm: asn1oid.oid_ed25519(), parameters: None })
+    test.assert(not asn1pkix.algorithms_agree(other))
+
+@test
+fn test_the_key_accessors_refuse_the_wrong_algorithm()
+    let ed = AsnSubjectPublicKeyInfo { algorithm: AsnAlgorithmId { algorithm: asn1oid.oid_ed25519(), parameters: None },
+                                       public_key: AsnBitString { unused_bits: 0, data: bytes.zeros(32) } }
+    test.assert_eq(refusal(asn1pkix.ec_curve_oid(ed)), AsnUnexpectedTag(0, 6, 6))
+    let ec = AsnSubjectPublicKeyInfo {
+        algorithm: AsnAlgorithmId { algorithm: asn1oid.oid_ec_public_key(), parameters: None },
+        public_key: AsnBitString { unused_bits: 0, data: bytes.zeros(32) } }
+    test.assert_eq(refusal(asn1pkix.ec_curve_oid(ec)), AsnMissingField(0, "parameters"))
+    let compressed = AsnSubjectPublicKeyInfo {
+        algorithm: AsnAlgorithmId { algorithm: asn1oid.oid_ec_public_key(),
+        parameters: Some(oid_der(asn1oid.oid_prime256v1())) },
+        public_key: AsnBitString { unused_bits: 0, data: bytes.concat([hex("02"), bytes.zeros(32)]) } }
+    test.assert_eq(refusal(asn1pkix.ec_public_key_xy(compressed)), AsnMissingField(0, "uncompressed point"))
+    test.assert_eq(refusal(asn1pkix.ed25519_public_key(compressed)), AsnUnexpectedTag(0, 6, 6))
+    let pki = AsnPrivateKeyInfo { version: 0, algorithm: compressed.algorithm, private_key: bytes.zeros(0),
+                                  attributes: None }
+    test.assert_eq(refusal(asn1pkix.ed25519_seed(pki)), AsnUnexpectedTag(0, 6, 6))
+
+@test
+fn test_a_name_escapes_what_rfc_4514_escapes()
+    let v = AsnAttribute { oid: asn1oid.oid_common_name(), value: " a+b;\\c " }
+    let odd = AsnAttribute { oid: asn1oid.oid([2, 5, 4, 5]), value: "#1" }
+    let n = AsnName { rdns: [AsnRdn { attributes: [v, odd] }], span: AsnSpan { off: 0, len: 0 } }
+    test.assert_eq(asn1pkix.name_text(n), "CN=\\ a\\+b\\;\\\\c\\ +2.5.4.5=\\#1")
+
+// ── the messages ────────────────────────────────────────────────────
+
+@test
+fn test_every_decode_refusal_has_a_message_and_an_offset()
+    let all = [AsnTruncated(1, 2), AsnLengthOverrun(1, 5, 2), AsnReservedLengthForm(1), AsnLengthNotRepresentable(1),
+               AsnNonMinimalLength(1), AsnIndefiniteLength(1), AsnStrayEndOfContents(1), AsnBadTagNumber(1),
+               AsnDepthExceeded(1, 64), AsnUnexpectedTag(1, 2, 16), AsnWrongConstruction(1, true),
+               AsnWrongConstruction(1, false), AsnBadBoolean(1, 5), AsnBadBoolean(1, -1), AsnNonMinimalInteger(1),
+               AsnIntegerTooLarge(1, 20), AsnBadBitString(1, 9), AsnNullWithContent(1, 1), AsnBadOid(1),
+               AsnBadStringBytes(1, 64), AsnBadTime(1, "x"), AsnTimeNotUtc(1), AsnSetOfNotSorted(1),
+               AsnDocumentTooLarge(1, 9, 8), AsnTrailingBytes(1, 3), AsnMissingField(1, "subject"),
+               AsnUnsupportedVersion(1, 9)]
+    var seen: [Str] = []
+    for e in all
+        test.assert_eq(asn1err.decode_offset(e), 1)
+        test.assert(str.starts_with(e.message(), "asn1: "))
+        test.assert(not list.contains(seen, e.message()))
+        list.push(seen, e.message())
+
+@test
+fn test_every_encode_refusal_has_a_message()
+    let all = [AsnBufferTooSmall(3, 1), AsnBadOidArcs("one arc"), AsnNegativeValue("arc"), AsnStringNotAllowed(19, 2),
+               AsnBadUnusedBits(9), AsnTimeNotWritable(2050), AsnEncodeDepthExceeded(64), AsnUnclosedValue(1),
+               AsnNothingOpen, AsnNotOneValue(2)]
+    var seen: [Str] = []
+    for e in all
+        test.assert(str.starts_with(e.message(), "asn1: "))
+        test.assert(not list.contains(seen, e.message()))
+        list.push(seen, e.message())

@@ -6,28 +6,22 @@
 //
 //   novo build --target=nrf52-qemu src/probe.nv
 //
-// which produces a real Cortex-M4 ELF or fails.  The consumer that
-// makes the claim worth having is a device that was PROVISIONED with a
-// public key and is handed a certificate: to decide whether to trust
-// what it was sent it has to walk into the TBSCertificate, into the
-// SubjectPublicKeyInfo, into the AlgorithmIdentifier, compare one
-// OBJECT IDENTIFIER and take the key bytes.  Every step of that is
-// header arithmetic and arc comparison, and none of it needs a heap.
+// which produces a Cortex-M4 ELF or fails.  The device this stands for
+// was provisioned with a public key and is handed a certificate.  To
+// decide whether to trust it, the device walks into the TBSCertificate,
+// the SubjectPublicKeyInfo and the AlgorithmIdentifier, compares one
+// OBJECT IDENTIFIER and takes the key bytes.  Every step is header
+// arithmetic and arc comparison, with no heap.
 //
-// It BUILDS; it does not run.  Every function it calls is a `todo()`
-// today, so a device that executed this would panic on the first line
-// of `main`.  What is being checked is the tier: `--target=nrf52-qemu`
-// stamps `@tier(embedded)` on every function it compiles, so the
-// checker walks the module and refuses a `Str` concatenation, a list
-// literal or an unbounded `while` wherever the implementation later
-// puts one.
+// Under QEMU (`qemu-system-arm -machine mps2-an386 -nographic
+// -semihosting -kernel embedded_probe.elf`) it prints a mark per byte
+// scanned, a `!` when both headers and the three writes came out as
+// expected, and its name.
 //
-// `asn1read`, `asn1univ`, `asn1oid`, `asn1write` AND `asn1pkix` ARE NOT
-// USED HERE, and that is the split rather than a convenience: they
-// speak `Str`, `Bytes` and `Cursor`, the embedded runtime defines none
-// of them, and one host-only function anywhere in a compilation unit is
-// an undefined symbol at embedded link time whether or not the firmware
-// calls it.
+// `asn1read`, `asn1univ`, `asn1oid`, `asn1write` and `asn1pkix` are not
+// used here.  They take and answer `Str`, `Bytes` and `Cursor`, which
+// the embedded runtime does not define, and one host-only function in a
+// compilation unit is an undefined symbol when linking for a device.
 
 use asn1tag
 

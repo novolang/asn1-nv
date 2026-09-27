@@ -9,12 +9,6 @@ specified in
 and writes it, and reads the certificate and key structures of
 [RFC 5280](https://www.rfc-editor.org/rfc/rfc5280) on top.
 
-**Status: NOT IMPLEMENTED — interface only.** Every function is declared
-with its full signature, but every body is a `todo()` that panics when
-called. The package is published so its design can be reviewed and
-depended on before it is implemented. Version 0.1.0 will be the first
-working release.
-
 ## What DER is
 
 A DER document is one value, and a value is three parts. The
@@ -92,11 +86,6 @@ fn main() [io]
                 Err(e) => println(e.message())
 ```
 
-Build and test with `novo pkg build` and `novo test`. Today `novo test`
-fails on purpose: every test reaches a `not implemented: <module>.<fn>`
-panic. The tests are the specification the implementation will have to
-satisfy.
-
 ## What the package contains
 
 | Module | Contents |
@@ -153,7 +142,8 @@ a byte at a time. See "Running on a microcontroller".
    lengths throughout, and SET OF elements sorted by their encodings.
 5. **A time without a `Z` is refused whatever the flag says.** A local
    offset is legal BER and means a certificate expires at a different
-   moment depending on where it is read.
+   moment depending on where it is read. The seconds are required, as
+   DER requires them (X.690 section 11.7).
 6. **The first two OID arcs share a byte and the division is capped at
    2.** Arc 2 puts no limit on its second component, so `2.100` packs to
    180 and 180 divided by 40 is 4, which is not an arc. The first arc is
@@ -203,8 +193,14 @@ novo build --target=nrf52-qemu tests/embedded_probe.nv
 ```
 
 The probe produces a Cortex-M4 executable that scans identifiers and
-both length forms, emits them again, and packs and unpacks OID arcs. It
-builds and it is not run: every function it calls is a `todo()` today.
+both length forms, emits them again, and packs and unpacks OID arcs.
+Under QEMU it prints a mark for each byte it scans and a `!` when the
+headers and the writes come out as expected.
+
+`tests/alloc_scan.sh` reads the LLVM the compiler emits for `asn1tag`
+and checks that no function in it calls the allocator. It also checks
+that the scan still finds an allocation spliced into the module, and
+that the compiler still refuses one there.
 
 The consumer for this is a device provisioned with a public key and
 handed a certificate. To decide whether to trust what it was sent, it
@@ -265,69 +261,35 @@ at link time on a device, whether or not the firmware calls it.
 ## Tests
 
 ```bash
-novo test tests/asn1_tests.nv        # 93 tests
+novo test tests/asn1_tests.nv        # 93 tests: X.690 and the RFC samples
+novo test tests/openssl_tests.nv     #  9 tests: certificates and keys OpenSSL made
+novo test tests/edges_tests.nv       # 31 tests: each refusal, BER, feeding a byte at a time
+bash tests/coverage.sh               # line coverage over src/, merged across the suites
+bash tests/alloc_scan.sh             # nothing in asn1tag allocates
 ```
 
-Every vector is from a specification: the two length forms and the
-`2.100.3` identifier from X.690 section 8, the certificate structure
-from RFC 5280, PKCS#8 from RFC 5208 and RFC 5958, and the Ed25519 public
-and private keys printed in RFC 8410 section 10. The implementations to
-check a port against are `rasn` in Rust and `asn1crypto` in Python.
+`tests/asn1_tests.nv` holds vectors from the specifications: the two
+length forms and the `2.100.3` identifier from X.690 section 8, the
+certificate structure from RFC 5280, PKCS#8 from RFC 5208 and RFC 5958,
+and the Ed25519 public and private keys printed in RFC 8410 section 10.
 
-The suite asserts that a header is read and written back byte for byte,
-that each of the five DER rules is refused by its own name and accepted
-under the tolerant limits, that a time without a `Z` is refused under
-both, that the OID arc cap holds for `2.100.3`, that nesting past the
-limit is refused, that an integer too large for an `Int` is answered as
-bytes, that a span is into the caller's bytes, that an Ed25519 key's
-parameters are absent, that its seed is wrapped twice, and that an ECDSA
-signature converts to two fixed-width halves.
+`tests/openssl_tests.nv` is written by `tools/openssl_vectors.py`.
+OpenSSL makes an EC P-256 key and an Ed25519 key, a self-signed
+certificate for each, and their PKCS#8 and SubjectPublicKeyInfo files.
+The suite walks every file and compares each value's offset, depth,
+header length, content length and tag with `openssl asn1parse`. It
+compares the certificate fields with `openssl x509`: the serial number,
+the subject and issuer in RFC 4514 form, the validity, the four named
+extensions, the public key and the ECDSA signature's `r` and `s`. It
+writes both key files back and requires the same bytes.
 
-The tests compile today and fail at run, each on the `not implemented`
-panic that is its body. That is the expected state of an interface
-release. They turn green one at a time as bodies land.
-
-## Implementation status
-
-| Item | Implemented |
-| --- | --- |
-| `asn1err.decode_offset`, `.is_der_only`, the two `message` impls | no |
-| `asn1tag.class_*`, `.constructed_bit`, `.identifier_byte` | no |
-| `asn1tag.class_of`, `.is_constructed`, `.tag_of_low`, `.is_high_tag`, `.identifier_len` | no |
-| `asn1tag.tag_*`, the fourteen universal numbers | no |
-| `asn1tag.length_len`, `.header_len`, `.indefinite_byte`, `.end_of_contents_len` | no |
-| `asn1tag.head_scan`, `.head_push`, `.head_need` | no |
-| `asn1tag.emit_identifier`, `.emit_length`, `.emit_arc` | no |
-| `asn1tag.arc_scan`, `.arc_push`, `.first_arc`, `.second_arc`, `.pack_arcs`, `.arc_len` | no |
-| `asn1read.default_limits`, `.ber_limits` | no |
-| `asn1read.header_at`, `.value_span_at`, `.content_span_at`, `.next_offset`, `.children_at` | no |
-| `asn1read.expect_at`, `.expect_context_at`, `.explicit_at`, `.implicit_at`, `.peek_tag_at` | no |
-| `asn1read.read_document`, `.span_bytes`, `.walk`, `.drain` | no |
-| `asn1read.reader`, `.feed`, `.finish`, `.offset`, `.pending_len`, `.depth`, `.at_boundary` | no |
-| `asn1univ.boolean_at`, `.integer_at`, `.integer_bytes_at`, `.octet_string_at`, `.null_at` | no |
-| `asn1univ.bit_string_at`, `.bit_count`, `.bit_at`, `.oid_at` | no |
-| `asn1univ.utf8_string_at`, `.printable_string_at`, `.ia5_string_at`, `.any_string_at` | no |
-| `asn1univ.utc_time_at`, `.generalized_time_at`, `.any_time_at`, `.utc_year` | no |
-| `asn1univ.sequence_at`, `.set_at`, `.set_of_at` | no |
-| `asn1univ.is_printable_string`, `.is_ia5_string` | no |
-| `asn1oid.oid`, `.arcs_of`, `.arc_count`, `.arc_at`, `.oid_text`, `.oid_of_text` | no |
-| `asn1oid.starts_with`, `.equals`, `.encoded_len`, `.encode_into`, `.decode`, `.oid_name` | no |
-| `asn1oid.oid_*`, the seventeen named identifiers | no |
-| `asn1write.tlv_len`, `.context_tlv_len`, `.integer_len`, `.integer_bytes_len` | no |
-| `asn1write.oid_len`, `.bit_string_len`, `.sort_set_of` | no |
-| `asn1write.write_*_into`, fifteen writers | no |
-| `asn1write.builder`, `.builder_depth`, `.builder_len`, `.build_limits` | no |
-| `asn1write.begin_sequence`, `.begin_set`, `.begin_set_of`, `.begin_explicit`, `.end`, `.done` | no |
-| `asn1write.put_*`, eleven functions | no |
-| `asn1pkix.algorithm_at`, `.spki_at`, `.name_at` | no |
-| `asn1pkix.parse_spki`, `.parse_pkcs8`, `.parse_certificate` | no |
-| `asn1pkix.extensions_of`, `.extension_by_oid`, `.unknown_critical_extensions` | no |
-| `asn1pkix.basic_constraints`, `.key_usage`, `.subject_alt_dns_names`, `.ext_key_usage_oids` | no |
-| `asn1pkix.ec_public_key_point`, `.ec_public_key_xy`, `.ec_curve_oid`, `.ec_private_key_scalar` | no |
-| `asn1pkix.ed25519_public_key`, `.ed25519_seed` | no |
-| `asn1pkix.signature_bytes`, `.ecdsa_signature_rs`, `.ecdsa_signature_der` | no |
-| `asn1pkix.algorithms_agree`, `.is_valid_at`, `.name_text`, `.attribute_value`, `.names_encode_equal` | no |
-| `asn1pkix.write_spki`, `.write_pkcs8`, `.ec_spki`, `.ed25519_spki` | no |
+The suites also assert that each of the five DER rules is refused by its
+own name and accepted under the tolerant limits, that a time without a
+`Z` is refused under both, that nesting past the limit is refused, that
+an integer too large for an `Int` is answered as bytes, that an Ed25519
+key's parameters are absent, that its seed is wrapped twice, and that
+feeding a document one byte at a time gives the events reading it whole
+gives.
 
 ## Licence
 

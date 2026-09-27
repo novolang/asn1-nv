@@ -4,6 +4,65 @@ Every published version, newest first. This file is on the publish
 allow-list, so it travels with the package: it is the only thing a
 consumer deciding whether to upgrade can read.
 
+## 0.1.0 — 2026-09-27
+
+The first implementation of the interface published as 0.0.1: DER and
+the tolerated BER forms read by offset and by feeding, the universal
+types, OBJECT IDENTIFIERs, a writer into a caller's buffer and a
+builder, and the PKIX key and certificate structures.  It requires
+novo 0.13.0 and calendar-nv `^0.2.0`.
+
+### Breaking changes
+
+- `AsnEncodeError` has two more variants.  `AsnNothingOpen` is what
+  `asn1write.end` answers when no constructed value is open; the
+  interface said that would panic.  `AsnNotOneValue(len)` is what
+  `asn1write.write_implicit_into` answers when the bytes it is handed are
+  not exactly one tag-length-value.  A `match` over `AsnEncodeError`
+  needs the two new arms.
+
+### Behaviour the interface left open
+
+- An indefinite length is accepted under `ber_limits` on a constructed
+  value only, as X.690 section 8.1.3.2 requires; on a primitive value it
+  is `AsnIndefiniteLength` under both limits.
+- A tag number below 31 written in the high-tag form is
+  `AsnBadTagNumber`.
+- A value longer than `max_length` is `AsnDocumentTooLarge`.
+- A BOOLEAN whose content is not one byte is `AsnBadBoolean` with
+  `byte` -1, a BIT STRING with no content is `AsnBadBitString` with
+  `unused` -1, and an INTEGER with no content is `AsnTruncated`.
+- UTCTime and GeneralizedTime require the seconds.  A GeneralizedTime
+  fraction must have no trailing zero, and digits past the ninth are
+  dropped.
+- The feeding reader reads one document: bytes after its first complete
+  value are `AsnTrailingBytes`.  `drain` reads its source 4096 bytes at a
+  time, and a failure of the source other than `IoClosed` is
+  `AsnTruncated` at the offset reached.
+- `asn1pkix.ec_public_key_point` and `ec_public_key_xy` refuse a key
+  that does not start with `04` as `AsnMissingField("uncompressed
+  point")`.  The wrong algorithm is `AsnUnexpectedTag(0, 6, 6)`.
+- `asn1pkix.name_text` writes an attribute this package has no short
+  name for as its dotted OID, and escapes values as RFC 4514 section 2.4
+  says.
+- An `AsnBuilder` value past `max_length` is `AsnBufferTooSmall`, naming
+  the length and the limit.
+- `asn1oid.oid_name` answers `id-Ed25519`, `id-X25519` and `id-sha256`
+  for those three, and the `id-ce-` names for the four extensions.
+
+### Tests
+
+- `tests/openssl_tests.nv`, written by `tools/openssl_vectors.py`,
+  compares every value of OpenSSL's certificates and keys with
+  `openssl asn1parse`, and the certificate fields with `openssl x509`.
+- `tests/edges_tests.nv` covers each refusal by name, the BER forms, and
+  feeding a document one byte at a time.
+- Two API test vectors were wrong and are corrected: the twenty-byte
+  serial number began with a redundant zero byte, which DER refuses, and
+  the EC key fixture was 65 zero bytes rather than an uncompressed point.
+- `tests/alloc_scan.sh` checks that nothing in `asn1tag` allocates.
+- Line coverage over `src/` is 100%, measured by `tests/coverage.sh`.
+
 ## 0.0.2 — 2026-09-15
 
 README rewritten to the package README style guide (docs/writing-a-readme.md); no change to the interface.

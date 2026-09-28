@@ -262,6 +262,15 @@ fn test_drain_reads_a_source_to_its_end_within_a_limit()
     match asn1read.drain(r, OneChunk { data: bytes.zeros(0) }, 100)
         Ok(s)  => test.assert_eq(list.len(s.events), 0)
         Err(e) => test.fail(e.message())
+    // An in-memory buffer answers its bytes once and then no bytes, so
+    // the document is read whole and closed.
+    let src = Buffer.from_bytes(bytes.to_byte_list(hex("3003020107")))
+    match asn1read.drain(r, src, 100)
+        Ok(s)  =>
+            test.assert_eq(list.len(s.events), 3)
+            test.assert(asn1read.at_boundary(s.reader))
+        Err(e) => test.fail(e.message())
+    src.drop()
 
 // ── asn1univ ────────────────────────────────────────────────────────
 

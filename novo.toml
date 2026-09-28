@@ -25,7 +25,7 @@ category    = "encoding"
 tags = ["asn1", "der", "ber", "x509", "pkcs8", "oid", "certificates", "embedded", "sans-io"]
 repository  = "https://github.com/novolang/asn1-nv"
 maintainers = ["novo-lang"]
-novo        = ">= 0.13.0"
+novo        = ">= 0.14.0"
 
 # A library: no `main`, so `novo pkg build` type-checks and
 # effect-checks every module under `src/` and writes no binary.

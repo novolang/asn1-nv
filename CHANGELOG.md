@@ -4,13 +4,16 @@ Every published version, newest first. This file is on the publish
 allow-list, so it travels with the package: it is the only thing a
 consumer deciding whether to upgrade can read.
 
-## 0.1.0 — 2026-09-27
+## 0.1.0 — 2026-09-28
 
 The first implementation of the interface published as 0.0.1: DER and
 the tolerated BER forms read by offset and by feeding, the universal
 types, OBJECT IDENTIFIERs, a writer into a caller's buffer and a
 builder, and the PKIX key and certificate structures.  It requires
-novo 0.13.0 and calendar-nv `^0.2.0`.
+novo 0.14.0 and calendar-nv `^0.2.0`.
+
+A test reads a whole document through `asn1read.drain` from a source
+that ends its stream.
 
 ### Breaking changes
 

@@ -26,6 +26,7 @@ use asn1oid
 use asn1univ
 use asn1write
 use civil
+use asn1err
 
 // An algorithm and its parameters, which is what every place PKIX names
 // an algorithm looks like.

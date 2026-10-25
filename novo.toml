@@ -1,6 +1,6 @@
 [package]
 name        = "asn1-nv"
-version     = "0.1.0"
+version     = "0.1.1"
 description = "DER, and enough BER to read what is already deployed: tag-length-value as a feed-and-drain reader with a depth bound, a writer into a caller's buffer, the universal types with OBJECT IDENTIFIER arc arithmetic and times over calendar-nv, and one application module — the PKIX structures the crypto tier parses keys and certificates out of.  No signature verification."
 license     = "Apache-2.0"
 
@@ -25,7 +25,7 @@ category    = "encoding"
 tags = ["asn1", "der", "ber", "x509", "pkcs8", "oid", "certificates", "embedded", "sans-io"]
 repository  = "https://github.com/novolang/asn1-nv"
 maintainers = ["novo-lang"]
-novo        = ">= 0.14.0"
+novo        = ">= 0.21.1"
 
 # A library: no `main`, so `novo pkg build` type-checks and
 # effect-checks every module under `src/` and writes no binary.

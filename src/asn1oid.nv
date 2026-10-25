@@ -20,6 +20,7 @@
 use std.bytes
 use std.str
 use asn1tag
+use asn1err
 
 // An object identifier: its arcs, in order, root first.
 //
@@ -127,9 +128,9 @@ pub fn encode_into(o: AsnOid, var dst: Cursor) -> Result<Int, AsnEncodeError> []
     let left = dst.remaining()
     if n > left
         return Err(AsnBufferTooSmall(n, left))
-    put_arc(dst, asn1tag.pack_arcs(o.arcs[0], o.arcs[1]))
+    put_arc(var dst, asn1tag.pack_arcs(o.arcs[0], o.arcs[1]))
     for a in o.arcs[2:]
-        put_arc(dst, a)
+        put_arc(var dst, a)
     Ok(n)
 
 // The OID a content byte string names.

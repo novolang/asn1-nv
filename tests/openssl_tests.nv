@@ -12,6 +12,7 @@ use asn1univ
 use asn1oid
 use asn1pkix
 use civil
+use asn1err
 
 // Every value of a document, one line each, in the form
 // `openssl asn1parse` prints: offset, depth, header length, content

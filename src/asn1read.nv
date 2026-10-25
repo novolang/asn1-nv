@@ -25,6 +25,7 @@
 // requires.
 
 use std.bytes
+use asn1err
 
 // A class, a construction and a number: everything an identifier
 // carries.

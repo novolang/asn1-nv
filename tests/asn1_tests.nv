@@ -289,7 +289,7 @@ fn test_an_oid_encodes_into_the_callers_buffer()
         Ok(n)  => test.assert_eq(n, 7)
         Err(e) => test.fail(e.message())
     var c = bytes.cursor_be(bytes.zeros(16))
-    match asn1oid.encode_into(ec, c)
+    match asn1oid.encode_into(ec, var c)
         Ok(n)  => test.assert_eq(n, 7)
         Err(e) => test.fail(e.message())
 
@@ -706,7 +706,7 @@ fn test_writing_a_printable_string_refuses_rather_than_promoting_it()
     // The type is part of what a name matches on, and changing it
     // changes the bytes a signature covers.
     var c = bytes.cursor_be(bytes.zeros(64))
-    match asn1write.write_printable_string_into("acme@example.com", c)
+    match asn1write.write_printable_string_into("acme@example.com", var c)
         Ok(_)  => test.fail("PrintableString has no @")
         Err(e) =>
             match e
@@ -716,21 +716,21 @@ fn test_writing_a_printable_string_refuses_rather_than_promoting_it()
 @test
 fn test_every_primitive_writer_takes_the_callers_buffer()
     var c = bytes.cursor_be(bytes.zeros(256))
-    test.assert_eq(ok_count(asn1write.write_boolean_into(true, c)), 3)
-    test.assert_eq(ok_count(asn1write.write_integer_into(7, c)), 3)
-    test.assert_eq(ok_count(asn1write.write_null_into(c)), 2)
-    test.assert_eq(ok_count(asn1write.write_octet_string_into(bytes.zeros(3), c)), 5)
-    test.assert_eq(ok_count(asn1write.write_bit_string_into(0, bytes.zeros(3), c)), 6)
-    test.assert_eq(ok_count(asn1write.write_oid_into(asn1oid.oid_ed25519(), c)), 5)
-    test.assert_eq(ok_count(asn1write.write_utf8_string_into("hi", c)), 4)
-    test.assert_eq(ok_count(asn1write.write_ia5_string_into("hi", c)), 4)
-    test.assert_eq(ok_count(asn1write.write_printable_string_into("HI", c)), 4)
-    test.assert_eq(ok_count(asn1write.write_tlv_into(asn1tag.tag_integer(), bytes.zeros(1), c)), 3)
-    test.assert_eq(ok_count(asn1write.write_header_into(asn1tag.tag_sequence(), true, 3, c)), 2)
-    test.assert_eq(ok_count(asn1write.write_context_header_into(0, true, 3, c)), 2)
-    test.assert_eq(ok_count(asn1write.write_integer_bytes_into(bytes.zeros(1), c)), 3)
-    test.assert_eq(ok_count(asn1write.write_explicit_into(0, bytes.zeros(3), c)), 5)
-    test.assert_eq(ok_count(asn1write.write_implicit_into(0, false, bytes.from_hex("020107") ?? bytes.zeros(0), c)),
+    test.assert_eq(ok_count(asn1write.write_boolean_into(true, var c)), 3)
+    test.assert_eq(ok_count(asn1write.write_integer_into(7, var c)), 3)
+    test.assert_eq(ok_count(asn1write.write_null_into(var c)), 2)
+    test.assert_eq(ok_count(asn1write.write_octet_string_into(bytes.zeros(3), var c)), 5)
+    test.assert_eq(ok_count(asn1write.write_bit_string_into(0, bytes.zeros(3), var c)), 6)
+    test.assert_eq(ok_count(asn1write.write_oid_into(asn1oid.oid_ed25519(), var c)), 5)
+    test.assert_eq(ok_count(asn1write.write_utf8_string_into("hi", var c)), 4)
+    test.assert_eq(ok_count(asn1write.write_ia5_string_into("hi", var c)), 4)
+    test.assert_eq(ok_count(asn1write.write_printable_string_into("HI", var c)), 4)
+    test.assert_eq(ok_count(asn1write.write_tlv_into(asn1tag.tag_integer(), bytes.zeros(1), var c)), 3)
+    test.assert_eq(ok_count(asn1write.write_header_into(asn1tag.tag_sequence(), true, 3, var c)), 2)
+    test.assert_eq(ok_count(asn1write.write_context_header_into(0, true, 3, var c)), 2)
+    test.assert_eq(ok_count(asn1write.write_integer_bytes_into(bytes.zeros(1), var c)), 3)
+    test.assert_eq(ok_count(asn1write.write_explicit_into(0, bytes.zeros(3), var c)), 5)
+    test.assert_eq(ok_count(asn1write.write_implicit_into(0, false, bytes.from_hex("020107") ?? bytes.zeros(0), var c)),
         3)
 
 fn ok_count(r: Result<Int, AsnEncodeError>) -> Int
@@ -743,7 +743,7 @@ fn ok_count(r: Result<Int, AsnEncodeError>) -> Int
 @test
 fn test_a_buffer_too_small_says_how_much_more_it_wanted()
     var c = bytes.cursor_be(bytes.zeros(1))
-    match asn1write.write_integer_into(7, c)
+    match asn1write.write_integer_into(7, var c)
         Ok(_)  => test.fail("three bytes do not fit in one")
         Err(e) =>
             match e
@@ -761,13 +761,13 @@ fn test_a_utctime_outside_its_window_is_not_writable()
     match civil.date(2050, 1, 1)
         Ok(d)  =>
             let t = civil.datetime(d, civil.midnight())
-            match asn1write.write_utc_time_into(t, c)
+            match asn1write.write_utc_time_into(t, var c)
                 Ok(_)  => test.fail("2050 has no unambiguous two-digit year")
                 Err(e) =>
                     match e
                         AsnTimeNotWritable(year) => test.assert_eq(year, 2050)
                         _                        => test.fail("expected AsnTimeNotWritable: ${e.message()}")
-            match asn1write.write_generalized_time_into(t, c)
+            match asn1write.write_generalized_time_into(t, var c)
                 Ok(n)  => test.assert_eq(n, 17)
                 Err(e) => test.fail(e.message())
         Err(e) => test.fail(e.message())

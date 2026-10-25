@@ -24,6 +24,7 @@ use std.str
 use asn1read
 use asn1oid
 use civil
+use asn1err
 
 // ── reading ─────────────────────────────────────────────────────────
 

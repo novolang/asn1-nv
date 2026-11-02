@@ -317,8 +317,11 @@ fn head_push(s: AsnHeadScan, b: u8) -> AsnHeadScan []
     if s.len == -1
         return first_length_byte(s, v, seen)
     // A byte of the long form's count of length bytes.
-    let len = s.len * 256 + v
     let fits = s.len <= 36028797018963967
+    let len = if fits
+        s.len * 256 + v
+    else
+        s.len
     AsnHeadScan { id: s.id, class: s.class, constructed: s.constructed, tag: s.tag, len: len, seen: seen,
                   want: s.want, indefinite: false, done: seen == s.want, bad: not fits }
 
@@ -424,7 +427,11 @@ fn arc_push(s: AsnArcScan, b: u8) -> AsnArcScan []
     let v = b as Int
     let padded = s.seen == 0 and v == 128
     let fits = s.acc <= 72057594037927935
-    AsnArcScan { acc: s.acc * 128 + (v & 127),
+    let grown = if fits
+        s.acc * 128 + (v & 127)
+    else
+        s.acc
+    AsnArcScan { acc: grown,
         seen: s.seen + 1,
         done: v < 128,
         bad: padded or not fits }
@@ -491,9 +498,13 @@ fn groups8(v: Int) -> Int []
 // may not be `0x80`, and a number below 31 has the low form instead.
 @tier(embedded)
 fn tag_byte(s: AsnHeadScan, v: Int, seen: Int) -> AsnHeadScan []
-    let tag = s.tag * 128 + (v & 127)
+    let fits = s.tag <= 72057594037927935
+    let tag = if fits
+        s.tag * 128 + (v & 127)
+    else
+        s.tag
     let last = v < 128
-    let bad = s.seen == 1 and v == 128 or s.tag > 72057594037927935 or last and tag < 31
+    let bad = s.seen == 1 and v == 128 or not fits or last and tag < 31
     AsnHeadScan { id: s.id, class: s.class, constructed: s.constructed, tag: tag, len: (if last then -1 else -2),
                   seen: seen, want: 0, indefinite: false, done: false, bad: bad }
 

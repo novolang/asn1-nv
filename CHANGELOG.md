@@ -4,6 +4,12 @@ Every published version, newest first. This file is on the publish
 allow-list, so it travels with the package: it is the only thing a
 consumer deciding whether to upgrade can read.
 
+## Unreleased
+
+### Fixed
+
+- An OBJECT IDENTIFIER arc, a high tag number or a long-form length wider than 63 bits is refused by the byte-at-a-time scanners, and a certificate version of the largest integer is refused, instead of overflowing.
+
 ## 0.1.0 — 2026-09-28
 
 The first implementation of the interface published as 0.0.1: DER and

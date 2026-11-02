@@ -26,6 +26,7 @@ use asn1oid
 use asn1univ
 use asn1write
 use civil
+use asn1err
 
 // An algorithm and its parameters, which is what every place PKIX names
 // an algorithm looks like.
@@ -133,8 +134,9 @@ pub struct AsnCertificate
 // ── reading ─────────────────────────────────────────────────────────
 
 // An AlgorithmIdentifier at `off`.
-pub fn algorithm_at(src: Bytes, off: Int,
-                    limits: AsnLimits) -> Result<AsnAlgorithmId, AsnDecodeError> []
+pub @tier(app)
+fn algorithm_at(src: Bytes, off: Int,
+                limits: AsnLimits) -> Result<AsnAlgorithmId, AsnDecodeError> []
     let kids = asn1univ.sequence_at(src, off, limits)!
     if list.len(kids) == 0
         return Err(AsnMissingField(off, "algorithm"))
@@ -160,8 +162,9 @@ pub fn algorithm_at(src: Bytes, off: Int,
 //         Ok(k)  => println("${k.public_key.unused_bits}")
 //         Err(e) => println(e.message())
 // ```
-pub fn spki_at(src: Bytes, off: Int,
-               limits: AsnLimits) -> Result<AsnSubjectPublicKeyInfo, AsnDecodeError> []
+pub @tier(app)
+fn spki_at(src: Bytes, off: Int,
+           limits: AsnLimits) -> Result<AsnSubjectPublicKeyInfo, AsnDecodeError> []
     let kids = fields(src, off, limits, ["algorithm", "subjectPublicKey"])!
     Ok(AsnSubjectPublicKeyInfo { algorithm: algorithm_at(src, kids[0].off, limits)!,
                                  public_key: asn1univ.bit_string_at(src, kids[1].off, limits)! })
@@ -170,13 +173,14 @@ pub fn spki_at(src: Bytes, off: Int,
 //
 // `read_document` and `spki_at` in one call, with trailing bytes
 // refused — because a public key file is exactly one value.
-pub fn parse_spki(src: Bytes,
-                  limits: AsnLimits) -> Result<AsnSubjectPublicKeyInfo, AsnDecodeError> []
+pub @tier(app)
+fn parse_spki(src: Bytes, limits: AsnLimits) -> Result<AsnSubjectPublicKeyInfo, AsnDecodeError> []
     asn1read.read_document(src, limits)!
     spki_at(src, 0, limits)
 
 // A whole `.der` file holding one PKCS#8 PrivateKeyInfo.
-pub fn parse_pkcs8(src: Bytes, limits: AsnLimits) -> Result<AsnPrivateKeyInfo, AsnDecodeError> []
+pub @tier(app)
+fn parse_pkcs8(src: Bytes, limits: AsnLimits) -> Result<AsnPrivateKeyInfo, AsnDecodeError> []
     asn1read.read_document(src, limits)!
     let kids = fields(src, 0, limits, ["version", "privateKeyAlgorithm", "privateKey"])!
     let version = asn1univ.integer_at(src, kids[0].off, limits)!
@@ -192,7 +196,8 @@ pub fn parse_pkcs8(src: Bytes, limits: AsnLimits) -> Result<AsnPrivateKeyInfo, A
                            attributes: attributes })
 
 // A whole `.der` file holding one X.509 certificate.
-pub fn parse_certificate(src: Bytes, limits: AsnLimits) -> Result<AsnCertificate, AsnDecodeError> []
+pub @tier(app)
+fn parse_certificate(src: Bytes, limits: AsnLimits) -> Result<AsnCertificate, AsnDecodeError> []
     asn1read.read_document(src, limits)!
     let outer = fields(src, 0, limits, ["tbsCertificate", "signatureAlgorithm", "signatureValue"])!
     let tbs = outer[0]
@@ -203,9 +208,11 @@ pub fn parse_certificate(src: Bytes, limits: AsnLimits) -> Result<AsnCertificate
     if list.len(parts) > 0 and asn1read.peek_tag_at(src, parts[0].off, limits)!.class == AsnContext
         asn1read.explicit_at(src, parts[0].off, 0, limits)!
         let inner = asn1read.expect_context_at(src, parts[0].off, 0, limits)!
-        version = asn1univ.integer_at(src, inner.off, limits)! + 1
-        if version < 1 or version > 3
-            return Err(AsnUnsupportedVersion(parts[0].off, version))
+        let raw = asn1univ.integer_at(src, inner.off, limits)!
+        if raw < 0 or raw > 2
+            // The version is the integer plus one; the largest integer has no successor to report.
+            return Err(AsnUnsupportedVersion(parts[0].off, (if raw == 9223372036854775807 then raw else raw + 1)))
+        version = raw + 1
         i = 1
     let names = ["serialNumber", "signature", "issuer", "validity", "subject", "subjectPublicKeyInfo"]
     if list.len(parts) < i + 6
@@ -223,7 +230,8 @@ pub fn parse_certificate(src: Bytes, limits: AsnLimits) -> Result<AsnCertificate
                         signature: asn1univ.bit_string_at(src, outer[2].off, limits)!, tbs: tbs })
 
 // A distinguished name at `off`.
-pub fn name_at(src: Bytes, off: Int, limits: AsnLimits) -> Result<AsnName, AsnDecodeError> []
+pub @tier(app)
+fn name_at(src: Bytes, off: Int, limits: AsnLimits) -> Result<AsnName, AsnDecodeError> []
     let span = asn1read.value_span_at(src, off, limits)!
     var rdns: [AsnRdn] = []
     for r in asn1univ.sequence_at(src, off, limits)!
@@ -239,7 +247,8 @@ pub fn name_at(src: Bytes, off: Int, limits: AsnLimits) -> Result<AsnName, AsnDe
 //
 // Order is kept because a certificate's extensions are part of the
 // signed bytes, and a caller re-emitting one must not reorder them.
-pub fn extensions_of(c: AsnCertificate) -> [AsnExtension] []
+pub @tier(app)
+fn extensions_of(c: AsnCertificate) -> [AsnExtension] []
     c.extensions[:]
 
 // The extension with this OID, or `None`.
@@ -256,7 +265,8 @@ pub fn extension_by_oid(c: AsnCertificate, o: AsnOid) -> ?AsnExtension []
 // understand a critical extension MUST refuse the certificate, and this
 // is the one call that answers "is there anything here I do not
 // understand".
-pub fn unknown_critical_extensions(c: AsnCertificate) -> [AsnExtension] []
+pub @tier(app)
+fn unknown_critical_extensions(c: AsnCertificate) -> [AsnExtension] []
     let named = [asn1oid.oid_basic_constraints(), asn1oid.oid_key_usage(), asn1oid.oid_subject_alt_name(),
                  asn1oid.oid_ext_key_usage()]
     var out: [AsnExtension] = []
@@ -277,8 +287,9 @@ pub struct AsnBasicConstraints
     path_len: Int
 
 // The `basicConstraints` extension, read.
-pub fn basic_constraints(c: AsnCertificate,
-                         limits: AsnLimits) -> Result<?AsnBasicConstraints, AsnDecodeError> []
+pub @tier(app)
+fn basic_constraints(c: AsnCertificate,
+                     limits: AsnLimits) -> Result<?AsnBasicConstraints, AsnDecodeError> []
     let Some(e) = extension_by_oid(c, asn1oid.oid_basic_constraints()) else return Ok(None)
     var is_ca = false
     var path_len = -1
@@ -296,7 +307,8 @@ pub fn basic_constraints(c: AsnCertificate,
 // the standard's — `digitalSignature` is bit 0, `keyCertSign` is bit 5
 // — and `asn1univ.bit_at` reads it with the same numbering the ASN.1
 // module uses.
-pub fn key_usage(c: AsnCertificate, limits: AsnLimits) -> Result<?AsnBitString, AsnDecodeError> []
+pub @tier(app)
+fn key_usage(c: AsnCertificate, limits: AsnLimits) -> Result<?AsnBitString, AsnDecodeError> []
     let Some(e) = extension_by_oid(c, asn1oid.oid_key_usage()) else return Ok(None)
     Ok(Some(asn1univ.bit_string_at(e.value, 0, limits)!))
 
@@ -306,8 +318,8 @@ pub fn key_usage(c: AsnCertificate, limits: AsnLimits) -> Result<?AsnBitString, 
 // a hostname against the common name and not this one has been wrong
 // since 2011, which is why this is the named call and the common name
 // is not.
-pub fn subject_alt_dns_names(c: AsnCertificate,
-                             limits: AsnLimits) -> Result<[Str], AsnDecodeError> []
+pub @tier(app)
+fn subject_alt_dns_names(c: AsnCertificate, limits: AsnLimits) -> Result<[Str], AsnDecodeError> []
     let Some(e) = extension_by_oid(c, asn1oid.oid_subject_alt_name()) else return Ok([])
     var out: [Str] = []
     for k in asn1univ.sequence_at(e.value, 0, limits)!
@@ -323,8 +335,8 @@ pub fn subject_alt_dns_names(c: AsnCertificate,
     Ok(out)
 
 // The OIDs in the `extKeyUsage` extension.
-pub fn ext_key_usage_oids(c: AsnCertificate,
-                          limits: AsnLimits) -> Result<[AsnOid], AsnDecodeError> []
+pub @tier(app)
+fn ext_key_usage_oids(c: AsnCertificate, limits: AsnLimits) -> Result<[AsnOid], AsnDecodeError> []
     let Some(e) = extension_by_oid(c, asn1oid.oid_ext_key_usage()) else return Ok([])
     var out: [AsnOid] = []
     for k in asn1univ.sequence_at(e.value, 0, limits)!
@@ -343,7 +355,8 @@ pub fn ext_key_usage_oids(c: AsnCertificate,
 // algorithm.  `AsnMissingField` when the curve parameters are absent,
 // and `AsnMissingField` naming `"uncompressed point"` when the key does
 // not start with `04` or has no even split.
-pub fn ec_public_key_point(k: AsnSubjectPublicKeyInfo) -> Result<Bytes, AsnDecodeError> []
+pub @tier(app)
+fn ec_public_key_point(k: AsnSubjectPublicKeyInfo) -> Result<Bytes, AsnDecodeError> []
     ec_curve_oid(k)!
     let data = k.public_key.data
     if bytes.len(data) < 3 or bytes.len(data) % 2 == 0 or (bytes.byte_at(data, 0) ?? 0) != 4
@@ -362,7 +375,8 @@ pub struct AsnEcPoint
 // `AsnMissingField` naming `"uncompressed point"`, because decompressing
 // it is a square root in the curve's field and that is p256-nv's
 // arithmetic rather than a parser's.
-pub fn ec_public_key_xy(k: AsnSubjectPublicKeyInfo) -> Result<AsnEcPoint, AsnDecodeError> []
+pub @tier(app)
+fn ec_public_key_xy(k: AsnSubjectPublicKeyInfo) -> Result<AsnEcPoint, AsnDecodeError> []
     let point = ec_public_key_point(k)!
     let half = (bytes.len(point) - 1) / 2
     Ok(AsnEcPoint { x: bytes.slice(point, 1, 1 + half), y: bytes.slice(point, 1 + half, 1 + 2 * half) })
@@ -372,7 +386,8 @@ pub fn ec_public_key_xy(k: AsnSubjectPublicKeyInfo) -> Result<AsnEcPoint, AsnDec
 // `oid_prime256v1` is the one p256-nv reads; anything else is a curve
 // this grid has no package for, and telling a caller which one is more
 // use than refusing.
-pub fn ec_curve_oid(k: AsnSubjectPublicKeyInfo) -> Result<AsnOid, AsnDecodeError> []
+pub @tier(app)
+fn ec_curve_oid(k: AsnSubjectPublicKeyInfo) -> Result<AsnOid, AsnDecodeError> []
     if not asn1oid.equals(k.algorithm.algorithm, asn1oid.oid_ec_public_key())
         return Err(AsnUnexpectedTag(0, 6, 6))
     let Some(params) = k.algorithm.parameters else return Err(AsnMissingField(0, "parameters"))
@@ -382,7 +397,8 @@ pub fn ec_curve_oid(k: AsnSubjectPublicKeyInfo) -> Result<AsnOid, AsnDecodeError
 //
 // Exactly what `ed25519.verifying_key_from_bytes` takes.
 // `AsnUnexpectedTag` when the algorithm is not `id-Ed25519`.
-pub fn ed25519_public_key(k: AsnSubjectPublicKeyInfo) -> Result<Bytes, AsnDecodeError> []
+pub @tier(app)
+fn ed25519_public_key(k: AsnSubjectPublicKeyInfo) -> Result<Bytes, AsnDecodeError> []
     if not asn1oid.equals(k.algorithm.algorithm, asn1oid.oid_ed25519())
         return Err(AsnUnexpectedTag(0, 6, 6))
     Ok(bytes.clone(k.public_key.data))
@@ -393,7 +409,8 @@ pub fn ed25519_public_key(k: AsnSubjectPublicKeyInfo) -> Result<Bytes, AsnDecode
 // `ECPrivateKey` SEQUENCE, and the scalar is the OCTET STRING inside
 // that.  One layer of nesting people forget, and the reason this is a
 // function rather than a field.
-pub fn ec_private_key_scalar(k: AsnPrivateKeyInfo) -> Result<Bytes, AsnDecodeError> []
+pub @tier(app)
+fn ec_private_key_scalar(k: AsnPrivateKeyInfo) -> Result<Bytes, AsnDecodeError> []
     let limits = asn1read.default_limits()
     let kids = fields(k.private_key, 0, limits, ["version", "privateKey"])!
     asn1univ.octet_string_at(k.private_key, kids[1].off, limits)
@@ -405,7 +422,8 @@ pub fn ec_private_key_scalar(k: AsnPrivateKeyInfo) -> Result<Bytes, AsnDecodeErr
 // second layer of wrapping RFC 8410 requires and everyone forgets, and
 // a parser that skipped it hands over thirty-four bytes that look
 // nearly right.
-pub fn ed25519_seed(k: AsnPrivateKeyInfo) -> Result<Bytes, AsnDecodeError> []
+pub @tier(app)
+fn ed25519_seed(k: AsnPrivateKeyInfo) -> Result<Bytes, AsnDecodeError> []
     if not asn1oid.equals(k.algorithm.algorithm, asn1oid.oid_ed25519())
         return Err(AsnUnexpectedTag(0, 6, 6))
     let limits = asn1read.default_limits()
@@ -418,7 +436,8 @@ pub fn ed25519_seed(k: AsnPrivateKeyInfo) -> Result<Bytes, AsnDecodeError> []
 // the sixty-four fixed bytes a verifier wants; `ecdsa_signature_rs` is
 // the one that splits it.  For Ed25519 it is the sixty-four bytes
 // directly.
-pub fn signature_bytes(c: AsnCertificate) -> Result<Bytes, AsnDecodeError> []
+pub @tier(app)
+fn signature_bytes(c: AsnCertificate) -> Result<Bytes, AsnDecodeError> []
     Ok(bytes.clone(c.signature.data))
 
 // The `r` and `s` of an ECDSA signature, each padded to `width` bytes.
@@ -433,8 +452,9 @@ pub struct AsnEcdsaSig
 // shortest-form INTEGER, so an `r` whose top byte is zero is 31 bytes,
 // and a verifier that fed those bytes in unpadded would be verifying a
 // different number.  This is the conversion every ECDSA bug is about.
-pub fn ecdsa_signature_rs(sig: Bytes, width: Int,
-                          limits: AsnLimits) -> Result<AsnEcdsaSig, AsnDecodeError> []
+pub @tier(app)
+fn ecdsa_signature_rs(sig: Bytes, width: Int,
+                      limits: AsnLimits) -> Result<AsnEcdsaSig, AsnDecodeError> []
     asn1read.read_document(sig, limits)!
     let kids = fields(sig, 0, limits, ["r", "s"])!
     if list.len(kids) > 2
@@ -447,7 +467,8 @@ pub fn ecdsa_signature_rs(sig: Bytes, width: Int,
 // The inverse, for a caller that signed and needs to put the result in
 // a certificate: each half as a shortest-form INTEGER, leading zero
 // added when the top bit is set, inside a SEQUENCE.
-pub fn ecdsa_signature_der(r: Bytes, s: Bytes) -> Result<Bytes, AsnEncodeError> []
+pub @tier(app)
+fn ecdsa_signature_der(r: Bytes, s: Bytes) -> Result<Bytes, AsnEncodeError> []
     var b = asn1write.builder(asn1write.build_limits())
     b = asn1write.begin_sequence(b)!
     b = asn1write.put_integer_bytes(b, positive(r))!
@@ -463,7 +484,8 @@ pub fn ecdsa_signature_der(r: Bytes, s: Bytes) -> Result<Bytes, AsnEncodeError> 
 // not is one to refuse: the outer one is what a verifier would pick and
 // the inner one is what is signed, so a mismatch is a substitution
 // nobody would notice.
-pub fn algorithms_agree(c: AsnCertificate) -> Bool []
+pub @tier(app)
+fn algorithms_agree(c: AsnCertificate) -> Bool []
     let a = c.signature_algorithm
     let b = c.outer_algorithm
     asn1oid.equals(a.algorithm, b.algorithm) and same_parameters(a.parameters, b.parameters)
@@ -496,7 +518,8 @@ pub fn is_valid_at(c: AsnCertificate, at: CivilDateTime) -> Bool []
 //         span: AsnSpan { off: 0, len: 0 } }
 //     println(asn1pkix.name_text(n))   // CN=example.com
 // ```
-pub fn name_text(n: AsnName) -> Str []
+pub @tier(app)
+fn name_text(n: AsnName) -> Str []
     var parts: [Str] = []
     for i in 0..list.len(n.rdns)
         let rdn = n.rdns[list.len(n.rdns) - 1 - i]
@@ -530,7 +553,8 @@ pub fn attribute_value(n: AsnName, o: AsnOid) -> ?Str []
 // case folding, whitespace collapse, string-type equivalence — are a
 // specification of their own that this package does not implement and
 // says so.
-pub fn names_encode_equal(src_a: Bytes, a: AsnName, src_b: Bytes, b: AsnName) -> Bool []
+pub @tier(app)
+fn names_encode_equal(src_a: Bytes, a: AsnName, src_b: Bytes, b: AsnName) -> Bool []
     let x = bytes.to_hex(asn1read.span_bytes(src_a, a.span))
     let y = bytes.to_hex(asn1read.span_bytes(src_b, b.span))
     x == y
@@ -541,7 +565,8 @@ pub fn names_encode_equal(src_a: Bytes, a: AsnName, src_b: Bytes, b: AsnName) ->
 //
 // What a program writes when it has generated a key and wants a
 // `.pem` file somebody else can read.
-pub fn write_spki(k: AsnSubjectPublicKeyInfo) -> Result<Bytes, AsnEncodeError> []
+pub @tier(app)
+fn write_spki(k: AsnSubjectPublicKeyInfo) -> Result<Bytes, AsnEncodeError> []
     var b = asn1write.builder(asn1write.build_limits())
     b = asn1write.begin_sequence(b)!
     b = put_algorithm(b, k.algorithm)!
@@ -549,7 +574,8 @@ pub fn write_spki(k: AsnSubjectPublicKeyInfo) -> Result<Bytes, AsnEncodeError> [
     asn1write.done(asn1write.end(b)!)
 
 // A PKCS#8 PrivateKeyInfo, encoded.
-pub fn write_pkcs8(k: AsnPrivateKeyInfo) -> Result<Bytes, AsnEncodeError> []
+pub @tier(app)
+fn write_pkcs8(k: AsnPrivateKeyInfo) -> Result<Bytes, AsnEncodeError> []
     var b = asn1write.builder(asn1write.build_limits())
     b = asn1write.begin_sequence(b)!
     b = asn1write.put_integer(b, k.version)!
@@ -564,8 +590,8 @@ pub fn write_pkcs8(k: AsnPrivateKeyInfo) -> Result<Bytes, AsnEncodeError> []
 // The convenience that closes the loop with p256-nv: that package
 // answers `x` and `y`, and this turns them into the bytes a file
 // holds.
-pub fn ec_spki(curve: AsnOid, x: Bytes,
-               y: Bytes) -> Result<AsnSubjectPublicKeyInfo, AsnEncodeError> []
+pub @tier(app)
+fn ec_spki(curve: AsnOid, x: Bytes, y: Bytes) -> Result<AsnSubjectPublicKeyInfo, AsnEncodeError> []
     var b = asn1write.builder(asn1write.build_limits())
     b = asn1write.put_oid(b, curve)!
     let params = asn1write.done(b)!
@@ -578,7 +604,8 @@ pub fn ec_spki(curve: AsnOid, x: Bytes,
 //
 // With the `parameters` absent, which is RFC 8410's rule and the one a
 // hand-written encoder gets wrong.
-pub fn ed25519_spki(key: Bytes) -> Result<AsnSubjectPublicKeyInfo, AsnEncodeError> []
+pub @tier(app)
+fn ed25519_spki(key: Bytes) -> Result<AsnSubjectPublicKeyInfo, AsnEncodeError> []
     Ok(AsnSubjectPublicKeyInfo { algorithm: AsnAlgorithmId { algorithm: asn1oid.oid_ed25519(), parameters: None },
                                  public_key: AsnBitString { unused_bits: 0, data: bytes.clone(key) } })
 
@@ -586,6 +613,7 @@ pub fn ed25519_spki(key: Bytes) -> Result<AsnSubjectPublicKeyInfo, AsnEncodeErro
 
 // The children of the SEQUENCE at `off`, refusing one with fewer than
 // the named fields.  The refusal names the first field that is missing.
+@tier(app)
 fn fields(src: Bytes, off: Int, limits: AsnLimits,
           names: [Str]) -> Result<[AsnSpan], AsnDecodeError> []
     let kids = asn1univ.sequence_at(src, off, limits)!
@@ -596,6 +624,7 @@ fn fields(src: Bytes, off: Int, limits: AsnLimits,
 // The `[3] EXPLICIT Extensions` among the optional fields at the end of
 // a TBSCertificate, or none.  `[1]` and `[2]` are the unique
 // identifiers, which are not read.
+@tier(app)
 fn extensions_in(src: Bytes, optional: [AsnSpan],
                  limits: AsnLimits) -> Result<[AsnExtension], AsnDecodeError> []
     for k in optional
@@ -605,6 +634,7 @@ fn extensions_in(src: Bytes, optional: [AsnSpan],
     Ok([])
 
 // The Extensions SEQUENCE at `off`.
+@tier(app)
 fn read_extensions(src: Bytes, off: Int,
                    limits: AsnLimits) -> Result<[AsnExtension], AsnDecodeError> []
     var out: [AsnExtension] = []
@@ -623,6 +653,7 @@ fn read_extensions(src: Bytes, off: Int,
 
 // One half of an ECDSA signature, as `width` bytes.  The INTEGER is
 // positive; its leading zero goes, and zeros are put back in front.
+@tier(app)
 fn padded(sig: Bytes, off: Int, width: Int, limits: AsnLimits) -> Result<Bytes, AsnDecodeError> []
     let raw = asn1univ.integer_bytes_at(sig, off, limits)!
     let start = leading_zeros(raw, 1)
@@ -633,6 +664,7 @@ fn padded(sig: Bytes, off: Int, width: Int, limits: AsnLimits) -> Result<Bytes, 
 
 // Big-endian unsigned bytes as the content of a positive INTEGER: the
 // leading zeros go, and one comes back when the top bit is set.
+@tier(app)
 fn positive(v: Bytes) -> Bytes []
     let start = leading_zeros(v, 0)
     let rest = bytes.slice(v, start, bytes.len(v))
@@ -642,6 +674,7 @@ fn positive(v: Bytes) -> Bytes []
 
 // Whether two algorithms' parameters are both absent, or both present
 // with the same encoding.
+@tier(app)
 fn same_parameters(a: ?Bytes, b: ?Bytes) -> Bool []
     if let Some(x) = a
         if let Some(y) = b
@@ -650,6 +683,7 @@ fn same_parameters(a: ?Bytes, b: ?Bytes) -> Bool []
     b == None
 
 // How many zero bytes `b` starts with, leaving at least `keep` bytes.
+@tier(app)
 fn leading_zeros(b: Bytes, keep: Int) -> Int []
     var n = 0
     for i in 0..bytes.len(b) - keep
@@ -658,6 +692,7 @@ fn leading_zeros(b: Bytes, keep: Int) -> Int []
     n
 
 // An AlgorithmIdentifier, with its parameters when there are any.
+@tier(app)
 fn put_algorithm(b: AsnBuilder, a: AsnAlgorithmId) -> Result<AsnBuilder, AsnEncodeError> []
     var next = asn1write.begin_sequence(b)!
     next = asn1write.put_oid(next, a.algorithm)!
@@ -668,6 +703,7 @@ fn put_algorithm(b: AsnBuilder, a: AsnAlgorithmId) -> Result<AsnBuilder, AsnEnco
 // An attribute value as RFC 4514 section 2.4 writes it: a backslash
 // before `"`, `+`, `,`, `;`, `<`, `>` and `\`, before a leading `#` or
 // space, and before a trailing space.
+@tier(app)
 fn escape(v: Str) -> Str []
     var out = ""
     let n = str.len(v)

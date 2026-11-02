@@ -24,6 +24,7 @@ use std.str
 use asn1read
 use asn1oid
 use civil
+use asn1err
 
 // ── reading ─────────────────────────────────────────────────────────
 
@@ -32,7 +33,8 @@ use civil
 // DER admits `0xff` for true and `0x00` for false and nothing else;
 // BER reads any non-zero byte as true, and `ber_tolerant` is the
 // switch.  `AsnBadBoolean` names the byte.
-pub fn boolean_at(src: Bytes, off: Int, limits: AsnLimits) -> Result<Bool, AsnDecodeError> []
+pub @tier(app)
+fn boolean_at(src: Bytes, off: Int, limits: AsnLimits) -> Result<Bool, AsnDecodeError> []
     let c = asn1read.expect_at(src, off, 1, limits)!
     if c.len != 1
         return Err(AsnBadBoolean(c.off, -1))
@@ -61,7 +63,8 @@ pub fn boolean_at(src: Bytes, off: Int, limits: AsnLimits) -> Result<Bool, AsnDe
 //         Ok(n)  => println("${n}")   // 7
 //         Err(e) => println(e.message())
 // ```
-pub fn integer_at(src: Bytes, off: Int, limits: AsnLimits) -> Result<Int, AsnDecodeError> []
+pub @tier(app)
+fn integer_at(src: Bytes, off: Int, limits: AsnLimits) -> Result<Int, AsnDecodeError> []
     let c = integer_content(src, off, limits)!
     // A redundant leading byte, which only BER leaves in, does not count
     // against the width.
@@ -87,7 +90,8 @@ pub fn integer_at(src: Bytes, off: Int, limits: AsnLimits) -> Result<Int, AsnDec
 // leading zero is not noise — it is what keeps a positive number from
 // looking negative, and a caller that stripped it and re-encoded would
 // produce different bytes and a different signature.
-pub fn integer_bytes_at(src: Bytes, off: Int, limits: AsnLimits) -> Result<Bytes, AsnDecodeError> []
+pub @tier(app)
+fn integer_bytes_at(src: Bytes, off: Int, limits: AsnLimits) -> Result<Bytes, AsnDecodeError> []
     let c = integer_content(src, off, limits)!
     Ok(asn1read.span_bytes(src, c))
 
@@ -104,8 +108,8 @@ pub struct AsnBitString
 //
 // `AsnBadBitString` for an unused count above 7, or a non-zero count on
 // empty content.
-pub fn bit_string_at(src: Bytes, off: Int,
-                     limits: AsnLimits) -> Result<AsnBitString, AsnDecodeError> []
+pub @tier(app)
+fn bit_string_at(src: Bytes, off: Int, limits: AsnLimits) -> Result<AsnBitString, AsnDecodeError> []
     let c = asn1read.expect_at(src, off, 3, limits)!
     if c.len == 0
         return Err(AsnBadBitString(c.off, -1))
@@ -130,13 +134,15 @@ pub fn bit_count(b: AsnBitString) -> Int []
 // False for an index past the end rather than a refusal: a KeyUsage
 // extension may be two bits long and a caller asking about bit 5 wants
 // "not set", not an error.
-pub fn bit_at(b: AsnBitString, i: Int) -> Bool []
+pub @tier(app)
+fn bit_at(b: AsnBitString, i: Int) -> Bool []
     if i < 0 or i >= bit_count(b)
         return false
     ((byte(b.data, i / 8) >> (7 - i % 8)) & 1) == 1
 
 // The OCTET STRING at `off`, as its content.
-pub fn octet_string_at(src: Bytes, off: Int, limits: AsnLimits) -> Result<Bytes, AsnDecodeError> []
+pub @tier(app)
+fn octet_string_at(src: Bytes, off: Int, limits: AsnLimits) -> Result<Bytes, AsnDecodeError> []
     Ok(asn1read.span_bytes(src, asn1read.expect_at(src, off, 4, limits)!))
 
 // The NULL at `off`, answering how many bytes it occupied: 2.
@@ -144,14 +150,16 @@ pub fn octet_string_at(src: Bytes, off: Int, limits: AsnLimits) -> Result<Bytes,
 // A length rather than nothing, so a caller walking a structure by
 // offset can step past it the same way it steps past everything else.
 // `AsnNullWithContent` for a NULL with a length that is not zero.
-pub fn null_at(src: Bytes, off: Int, limits: AsnLimits) -> Result<Int, AsnDecodeError> []
+pub @tier(app)
+fn null_at(src: Bytes, off: Int, limits: AsnLimits) -> Result<Int, AsnDecodeError> []
     let c = asn1read.expect_at(src, off, 5, limits)!
     if c.len != 0
         return Err(AsnNullWithContent(off, c.len))
     Ok(c.off - off)
 
 // The OBJECT IDENTIFIER at `off`.
-pub fn oid_at(src: Bytes, off: Int, limits: AsnLimits) -> Result<AsnOid, AsnDecodeError> []
+pub @tier(app)
+fn oid_at(src: Bytes, off: Int, limits: AsnLimits) -> Result<AsnOid, AsnDecodeError> []
     let c = asn1read.expect_at(src, off, 6, limits)!
     match asn1oid.decode(asn1read.span_bytes(src, c))
         Ok(o)  => Ok(o)
@@ -161,7 +169,8 @@ pub fn oid_at(src: Bytes, off: Int, limits: AsnLimits) -> Result<AsnOid, AsnDeco
 //
 // `AsnBadStringBytes` for content that is not valid UTF-8, naming the
 // byte.
-pub fn utf8_string_at(src: Bytes, off: Int, limits: AsnLimits) -> Result<Str, AsnDecodeError> []
+pub @tier(app)
+fn utf8_string_at(src: Bytes, off: Int, limits: AsnLimits) -> Result<Str, AsnDecodeError> []
     let c = asn1read.expect_at(src, off, 12, limits)!
     check_utf8(src, c)!
     Ok(bytes.to_str(asn1read.span_bytes(src, c)))
@@ -172,8 +181,8 @@ pub fn utf8_string_at(src: Bytes, off: Int, limits: AsnLimits) -> Result<Str, As
 // a-z, 0-9, space, and `' ( ) + , - . / : = ?` — no `@`, no `_`, no
 // `*`.  Every real certificate has a subject that could not be a
 // PrintableString for exactly that reason, which is why UTF8String won.
-pub fn printable_string_at(src: Bytes, off: Int,
-                           limits: AsnLimits) -> Result<Str, AsnDecodeError> []
+pub @tier(app)
+fn printable_string_at(src: Bytes, off: Int, limits: AsnLimits) -> Result<Str, AsnDecodeError> []
     let c = asn1read.expect_at(src, off, 19, limits)!
     for i in c.off..c.off + c.len
         if not printable(byte(src, i))
@@ -184,7 +193,8 @@ pub fn printable_string_at(src: Bytes, off: Int,
 //
 // What an email address and a DNS name in a subject alternative name
 // are written in.
-pub fn ia5_string_at(src: Bytes, off: Int, limits: AsnLimits) -> Result<Str, AsnDecodeError> []
+pub @tier(app)
+fn ia5_string_at(src: Bytes, off: Int, limits: AsnLimits) -> Result<Str, AsnDecodeError> []
     let c = asn1read.expect_at(src, off, 22, limits)!
     for i in c.off..c.off + c.len
         if byte(src, i) > 127
@@ -198,7 +208,8 @@ pub fn ia5_string_at(src: Bytes, off: Int, limits: AsnLimits) -> Result<Str, Asn
 // `DirectoryString`, which is UTF8String today and PrintableString in
 // anything old, and a parser that demanded one would fail on half the
 // certificates in the world.
-pub fn any_string_at(src: Bytes, off: Int, limits: AsnLimits) -> Result<Str, AsnDecodeError> []
+pub @tier(app)
+fn any_string_at(src: Bytes, off: Int, limits: AsnLimits) -> Result<Str, AsnDecodeError> []
     let t = asn1read.peek_tag_at(src, off, limits)!
     if t.class == AsnUniversal and t.number == 19
         return printable_string_at(src, off, limits)
@@ -226,8 +237,8 @@ pub fn any_string_at(src: Bytes, off: Int, limits: AsnLimits) -> Result<Str, Asn
 //         Ok(t)  => println("${t.date.year}")   // 2026
 //         Err(e) => println(e.message())
 // ```
-pub fn utc_time_at(src: Bytes, off: Int,
-                   limits: AsnLimits) -> Result<CivilDateTime, AsnDecodeError> []
+pub @tier(app)
+fn utc_time_at(src: Bytes, off: Int, limits: AsnLimits) -> Result<CivilDateTime, AsnDecodeError> []
     let c = asn1read.expect_at(src, off, 23, limits)!
     let text = time_text(src, c)!
     if str.len(text) != 13 or not digits(text, 0, 12)
@@ -242,8 +253,9 @@ pub fn utc_time_at(src: Bytes, off: Int,
 // when it would be zero; anything else is `AsnBadTime`.  Digits past
 // the ninth are dropped, because the time holds nanoseconds.  What a
 // certificate valid past 2049 must use.
-pub fn generalized_time_at(src: Bytes, off: Int,
-                           limits: AsnLimits) -> Result<CivilDateTime, AsnDecodeError> []
+pub @tier(app)
+fn generalized_time_at(src: Bytes, off: Int,
+                       limits: AsnLimits) -> Result<CivilDateTime, AsnDecodeError> []
     let c = asn1read.expect_at(src, off, 24, limits)!
     let text = time_text(src, c)!
     let n = str.len(text)
@@ -264,8 +276,8 @@ pub fn generalized_time_at(src: Bytes, off: Int,
 //
 // What a certificate's `notBefore` and `notAfter` are read with: RFC
 // 5280 says each is a CHOICE of the two, chosen by the year.
-pub fn any_time_at(src: Bytes, off: Int,
-                   limits: AsnLimits) -> Result<CivilDateTime, AsnDecodeError> []
+pub @tier(app)
+fn any_time_at(src: Bytes, off: Int, limits: AsnLimits) -> Result<CivilDateTime, AsnDecodeError> []
     let t = asn1read.peek_tag_at(src, off, limits)!
     if t.class == AsnUniversal and t.number == 24
         return generalized_time_at(src, off, limits)
@@ -274,7 +286,8 @@ pub fn any_time_at(src: Bytes, off: Int,
 // The children of the SEQUENCE at `off`, as whole-value spans.
 //
 // `AsnUnexpectedTag` when the value is not a SEQUENCE.
-pub fn sequence_at(src: Bytes, off: Int, limits: AsnLimits) -> Result<[AsnSpan], AsnDecodeError> []
+pub @tier(app)
+fn sequence_at(src: Bytes, off: Int, limits: AsnLimits) -> Result<[AsnSpan], AsnDecodeError> []
     asn1read.expect_at(src, off, 16, limits)!
     asn1read.children_at(src, off, limits)
 
@@ -282,7 +295,8 @@ pub fn sequence_at(src: Bytes, off: Int, limits: AsnLimits) -> Result<[AsnSpan],
 //
 // A SET's order is not semantically significant, and `set_of_at` is the
 // one that checks DER's ordering rule.
-pub fn set_at(src: Bytes, off: Int, limits: AsnLimits) -> Result<[AsnSpan], AsnDecodeError> []
+pub @tier(app)
+fn set_at(src: Bytes, off: Int, limits: AsnLimits) -> Result<[AsnSpan], AsnDecodeError> []
     asn1read.expect_at(src, off, 17, limits)!
     asn1read.children_at(src, off, limits)
 
@@ -294,7 +308,8 @@ pub fn set_at(src: Bytes, off: Int, limits: AsnLimits) -> Result<[AsnSpan], AsnD
 // `AsnSetOfNotSorted` when they are not, and `ber_tolerant` accepts it
 // — which is safe only when no signature is being checked over the
 // bytes.
-pub fn set_of_at(src: Bytes, off: Int, limits: AsnLimits) -> Result<[AsnSpan], AsnDecodeError> []
+pub @tier(app)
+fn set_of_at(src: Bytes, off: Int, limits: AsnLimits) -> Result<[AsnSpan], AsnDecodeError> []
     let kids = set_at(src, off, limits)!
     if not limits.ber_tolerant
         for i in 1..list.len(kids)
@@ -356,6 +371,7 @@ pub fn utc_year(yy: Int) -> Int []
 // ── the parts the readers above share ───────────────────────────────
 
 // The byte at `i`, or -1 outside the buffer.
+@tier(app)
 fn byte(src: Bytes, i: Int) -> Int []
     bytes.byte_at(src, i) ?? -1
 
@@ -366,6 +382,7 @@ fn redundant(first: Int, second: Int) -> Bool []
     first == 0 and second < 128 or first == 255 and second >= 128
 
 // The content of the INTEGER at `off`, checked for DER's shortest form.
+@tier(app)
 fn integer_content(src: Bytes, off: Int, limits: AsnLimits) -> Result<AsnSpan, AsnDecodeError> []
     let c = asn1read.expect_at(src, off, 2, limits)!
     if c.len == 0
@@ -384,6 +401,7 @@ fn printable(b: Int) -> Bool []
 
 // Check that a span is UTF-8 (RFC 3629): no overlong form, no
 // surrogate, nothing above U+10FFFF.
+@tier(app)
 fn check_utf8(src: Bytes, c: AsnSpan) -> Result<Unit, AsnDecodeError> []
     var i = c.off
     let end = c.off + c.len
@@ -432,6 +450,7 @@ fn utf8_width(b: Int) -> Int []
     0
 
 // A time value's text, refused when it does not end in `Z`.
+@tier(app)
 fn time_text(src: Bytes, c: AsnSpan) -> Result<Str, AsnDecodeError> []
     for i in c.off..c.off + c.len
         if byte(src, i) > 127
@@ -459,6 +478,7 @@ fn number(text: Str, from: Int, width: Int) -> Int []
 // The civil date and time a checked time text names: the year already
 // read, then month, day, hour, minute and second from byte `at`, and
 // the fraction's digits.
+@tier(app)
 fn civil_of(off: Int, text: Str, year: Int, at: Int,
             fraction: Str) -> Result<CivilDateTime, AsnDecodeError> []
     var nano = 0

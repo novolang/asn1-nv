@@ -19,6 +19,7 @@
 
 use std.bytes
 use std.str
+use asn1err
 use asn1tag
 
 // An object identifier: its arcs, in order, root first.
@@ -39,11 +40,13 @@ pub struct AsnOid
 //     println(asn1oid.oid_text(asn1oid.oid([1, 2, 840, 10045, 2, 1])))
 //     // 1.2.840.10045.2.1
 // ```
-pub fn oid(arcs: [Int]) -> AsnOid []
+pub @tier(app)
+fn oid(arcs: [Int]) -> AsnOid []
     AsnOid { arcs: list.clone(arcs) }
 
 // The arcs, in order.
-pub fn arcs_of(o: AsnOid) -> [Int] []
+pub @tier(app)
+fn arcs_of(o: AsnOid) -> [Int] []
     list.clone(o.arcs)
 
 // How many arcs there are.
@@ -60,7 +63,8 @@ pub fn arc_at(o: AsnOid, i: Int) -> Int []
     o.arcs[i]
 
 // The dotted text: `"1.2.840.10045.2.1"`.
-pub fn oid_text(o: AsnOid) -> Str []
+pub @tier(app)
+fn oid_text(o: AsnOid) -> Str []
     var parts: [Str] = []
     for a in o.arcs
         list.push(parts, str.from_int(a))
@@ -72,7 +76,8 @@ pub fn oid_text(o: AsnOid) -> Str []
 // No validity check beyond the grammar: `oid_of_text("9.9.9")` answers
 // an OID, and `encode_into` is what refuses it, because a first arc
 // above 2 is an encoding rule rather than a syntax one.
-pub fn oid_of_text(text: Str) -> ?AsnOid []
+pub @tier(app)
+fn oid_of_text(text: Str) -> ?AsnOid []
     var arcs: [Int] = []
     for part in str.split(text, ".")
         if not is_digits(part) or str.len(part) > 1 and str.starts_with(part, "0")
@@ -93,7 +98,8 @@ pub fn oid_of_text(text: Str) -> ?AsnOid []
 //     let ec = asn1oid.oid([1, 2, 840, 10045, 2, 1])
 //     println("${asn1oid.starts_with(ec, asn1oid.oid([1, 2, 840]))}")   // true
 // ```
-pub fn starts_with(o: AsnOid, prefix: AsnOid) -> Bool []
+pub @tier(app)
+fn starts_with(o: AsnOid, prefix: AsnOid) -> Bool []
     let n = list.len(prefix.arcs)
     if n > list.len(o.arcs)
         return false
@@ -110,7 +116,8 @@ pub fn equals(a: AsnOid, b: AsnOid) -> Bool []
 // The first two arcs packed into one value, then one group of seven
 // bits per arc.  `AsnBadOidArcs` for fewer than two arcs, a first arc
 // above 2, or a second arc above 39 under a first arc of 0 or 1.
-pub fn encoded_len(o: AsnOid) -> Result<Int, AsnEncodeError> []
+pub @tier(app)
+fn encoded_len(o: AsnOid) -> Result<Int, AsnEncodeError> []
     check_arcs(o)!
     var n = asn1tag.arc_len(asn1tag.pack_arcs(o.arcs[0], o.arcs[1]))
     for a in o.arcs[2:]
@@ -122,14 +129,15 @@ pub fn encoded_len(o: AsnOid) -> Result<Int, AsnEncodeError> []
 //
 // Content only: `asn1write.write_oid_into` is the one that puts the
 // `06` and the length in front of it.
-pub fn encode_into(o: AsnOid, var dst: Cursor) -> Result<Int, AsnEncodeError> []
+pub @tier(app)
+fn encode_into(o: AsnOid, var dst: Cursor) -> Result<Int, AsnEncodeError> []
     let n = encoded_len(o)!
     let left = dst.remaining()
     if n > left
         return Err(AsnBufferTooSmall(n, left))
-    put_arc(dst, asn1tag.pack_arcs(o.arcs[0], o.arcs[1]))
+    put_arc(var dst, asn1tag.pack_arcs(o.arcs[0], o.arcs[1]))
     for a in o.arcs[2:]
-        put_arc(dst, a)
+        put_arc(var dst, a)
     Ok(n)
 
 // The OID a content byte string names.
@@ -149,7 +157,8 @@ pub fn encode_into(o: AsnOid, var dst: Cursor) -> Result<Int, AsnEncodeError> []
 //         Ok(o)  => println(asn1oid.oid_text(o))   // 1.2.840.10045.2.1
 //         Err(e) => println(e.message())
 // ```
-pub fn decode(content: Bytes) -> Result<AsnOid, AsnDecodeError> []
+pub @tier(app)
+fn decode(content: Bytes) -> Result<AsnOid, AsnDecodeError> []
     let n = bytes.len(content)
     if n == 0
         return Err(AsnBadOid(0))
@@ -175,87 +184,104 @@ pub fn decode(content: Bytes) -> Result<AsnOid, AsnDecodeError> []
 // `1.2.840.10045.2.1` — `id-ecPublicKey`.  The algorithm of every
 // SubjectPublicKeyInfo holding an elliptic-curve key, with the curve in
 // the parameters beside it.
-pub fn oid_ec_public_key() -> AsnOid []
+pub @tier(app)
+fn oid_ec_public_key() -> AsnOid []
     AsnOid { arcs: [1, 2, 840, 10045, 2, 1] }
 
 // `1.2.840.10045.3.1.7` — `prime256v1`, which is NIST P-256 and
 // secp256r1 and the same curve under three names.  p256-nv's.
-pub fn oid_prime256v1() -> AsnOid []
+pub @tier(app)
+fn oid_prime256v1() -> AsnOid []
     AsnOid { arcs: [1, 2, 840, 10045, 3, 1, 7] }
 
 // `1.3.132.0.34` — `secp384r1`, P-384.  Named so that a parser can tell
 // a caller its key is a curve this grid has no package for, rather than
 // handing over bytes of the wrong length.
-pub fn oid_secp384r1() -> AsnOid []
+pub @tier(app)
+fn oid_secp384r1() -> AsnOid []
     AsnOid { arcs: [1, 3, 132, 0, 34] }
 
 // `1.3.101.112` — `id-Ed25519`.  ed25519-nv's, and the OID that is its
 // own algorithm: an Ed25519 key's `parameters` field is absent, not
 // NULL, which is the difference RFC 8410 spells out and a writer that
 // wrote `05 00` would get wrong.
-pub fn oid_ed25519() -> AsnOid []
+pub @tier(app)
+fn oid_ed25519() -> AsnOid []
     AsnOid { arcs: [1, 3, 101, 112] }
 
 // `1.3.101.110` — `id-X25519`.  x25519-nv's, same absent-parameters
 // rule.
-pub fn oid_x25519() -> AsnOid []
+pub @tier(app)
+fn oid_x25519() -> AsnOid []
     AsnOid { arcs: [1, 3, 101, 110] }
 
 // `1.2.840.113549.1.1.1` — `rsaEncryption`.  There is no RSA row on the
 // grid, and the OID is here so a parser can say "this is an RSA key and
 // nothing here reads one" rather than failing obscurely.
-pub fn oid_rsa_encryption() -> AsnOid []
+pub @tier(app)
+fn oid_rsa_encryption() -> AsnOid []
     AsnOid { arcs: [1, 2, 840, 113549, 1, 1, 1] }
 
 // `2.16.840.1.101.3.4.2.1` — `id-sha256`.  crypto-nv's digest.
-pub fn oid_sha256() -> AsnOid []
+pub @tier(app)
+fn oid_sha256() -> AsnOid []
     AsnOid { arcs: [2, 16, 840, 1, 101, 3, 4, 2, 1] }
 
 // `1.2.840.10045.4.3.2` — `ecdsa-with-SHA256`.  The signature
 // algorithm on a P-256 certificate, and what jwt-nv's ES256 signs
 // with.
-pub fn oid_ecdsa_with_sha256() -> AsnOid []
+pub @tier(app)
+fn oid_ecdsa_with_sha256() -> AsnOid []
     AsnOid { arcs: [1, 2, 840, 10045, 4, 3, 2] }
 
 // `1.2.840.113549.1.1.11` — `sha256WithRSAEncryption`.  Named for the
 // same reason as `oid_rsa_encryption`.
-pub fn oid_sha256_with_rsa() -> AsnOid []
+pub @tier(app)
+fn oid_sha256_with_rsa() -> AsnOid []
     AsnOid { arcs: [1, 2, 840, 113549, 1, 1, 11] }
 
 // `2.5.4.3` — `id-at-commonName`, the `CN=` of a distinguished name.
-pub fn oid_common_name() -> AsnOid []
+pub @tier(app)
+fn oid_common_name() -> AsnOid []
     AsnOid { arcs: [2, 5, 4, 3] }
 
 // `2.5.4.6` — `id-at-countryName`, `C=`.
-pub fn oid_country_name() -> AsnOid []
+pub @tier(app)
+fn oid_country_name() -> AsnOid []
     AsnOid { arcs: [2, 5, 4, 6] }
 
 // `2.5.4.10` — `id-at-organizationName`, `O=`.
-pub fn oid_organization_name() -> AsnOid []
+pub @tier(app)
+fn oid_organization_name() -> AsnOid []
     AsnOid { arcs: [2, 5, 4, 10] }
 
 // `2.5.4.11` — `id-at-organizationalUnitName`, `OU=`.
-pub fn oid_organizational_unit_name() -> AsnOid []
+pub @tier(app)
+fn oid_organizational_unit_name() -> AsnOid []
     AsnOid { arcs: [2, 5, 4, 11] }
 
 // `2.5.29.15` — `id-ce-keyUsage`, the extension that says what a key
 // may be used for.
-pub fn oid_key_usage() -> AsnOid []
+pub @tier(app)
+fn oid_key_usage() -> AsnOid []
     AsnOid { arcs: [2, 5, 29, 15] }
 
 // `2.5.29.17` — `id-ce-subjectAltName`, where a certificate's DNS names
 // actually live.  A reader that matched a hostname against the common
 // name and not this one has been wrong since 2011.
-pub fn oid_subject_alt_name() -> AsnOid []
+pub @tier(app)
+fn oid_subject_alt_name() -> AsnOid []
     AsnOid { arcs: [2, 5, 29, 17] }
 
 // `2.5.29.19` — `id-ce-basicConstraints`, which says whether a
 // certificate may sign others.
-pub fn oid_basic_constraints() -> AsnOid []
+pub @tier(app)
+fn oid_basic_constraints() -> AsnOid []
     AsnOid { arcs: [2, 5, 29, 19] }
 
 // `2.5.29.37` — `id-ce-extKeyUsage`.
-pub fn oid_ext_key_usage() -> AsnOid []
+pub @tier(app)
+fn oid_ext_key_usage() -> AsnOid []
     AsnOid { arcs: [2, 5, 29, 37] }
 
 // The short name this package knows for an OID — `"ecPublicKey"`,
@@ -273,7 +299,8 @@ pub fn oid_ext_key_usage() -> AsnOid []
 // fn main() [io]
 //     println(asn1oid.oid_name(asn1oid.oid_common_name()))   // CN
 // ```
-pub fn oid_name(o: AsnOid) -> Str []
+pub @tier(app)
+fn oid_name(o: AsnOid) -> Str []
     for pair in known()
         let (arcs, name) = pair
         if arcs == o.arcs
@@ -291,6 +318,7 @@ fn is_digits(s: Str) -> Bool []
     true
 
 // The OIDs `oid_name` knows, with their names.
+@tier(app)
 fn known() -> [([Int], Str)] []
     [(oid_ec_public_key().arcs, "ecPublicKey"), (oid_prime256v1().arcs, "prime256v1"),
      (oid_secp384r1().arcs, "secp384r1"), (oid_ed25519().arcs, "id-Ed25519"), (oid_x25519().arcs, "id-X25519"),
@@ -303,6 +331,7 @@ fn known() -> [([Int], Str)] []
 
 // The arcs an encoding needs: at least two, none negative, a first arc
 // of 0, 1 or 2, and a second below 40 under 0 and 1.
+@tier(app)
 fn check_arcs(o: AsnOid) -> Result<Unit, AsnEncodeError> []
     let n = list.len(o.arcs)
     if n < 2

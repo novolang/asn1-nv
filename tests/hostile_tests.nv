@@ -1,0 +1,64 @@
+// tests/hostile_tests.nv — arcs and versions that overflow the arithmetic that reads them.
+
+use std.test
+use std.bytes
+use asn1read
+use asn1oid
+use asn1pkix
+use asn1tag
+
+fn hex(h: Str) -> Bytes
+    bytes.from_hex(h) ?? bytes.zeros(0)
+
+@test
+fn test_an_oid_arc_of_more_than_nine_continuation_bytes_is_refused()
+    match asn1oid.decode(hex("2aFFFFFFFFFFFFFFFFFFFFFF7f"))
+        Ok(_)  => test.fail("an arc wider than 63 bits was accepted")
+        Err(_) => test.assert_eq(1, 1)
+
+@test
+fn test_the_arc_scan_stops_growing_once_it_is_bad()
+    var s = asn1tag.arc_scan()
+    for _ in 0..12
+        s = asn1tag.arc_push(s, 0xFF as u8)
+    test.assert_eq(s.bad, true)
+
+@test
+fn test_an_oid_arc_of_eight_bytes_still_decodes()
+    match asn1oid.decode(hex("2aFFFFFFFFFFFFFF7F"))
+        Ok(o)  => test.assert_eq(asn1oid.arc_count(o), 3)
+        Err(_) => test.fail("a 56-bit arc was refused")
+
+@test
+fn test_a_certificate_version_of_int_max_is_refused()
+    // A TBS holding only [0] { INTEGER 0x7FFFFFFFFFFFFFFF }.
+    match asn1pkix.parse_certificate(hex("3013300CA00A02087FFFFFFFFFFFFFFF3000030100"), asn1read.default_limits())
+        Ok(_)  => test.fail("a certificate version of 2^63 was accepted")
+        Err(_) => test.assert_eq(1, 1)
+
+@test
+fn test_a_head_scan_of_an_eight_byte_length_does_not_overflow()
+    var s = asn1tag.head_scan()
+    s = asn1tag.head_push(s, 0x30 as u8)
+    s = asn1tag.head_push(s, 0x88 as u8)
+    for _ in 0..8
+        s = asn1tag.head_push(s, 0xFF as u8)
+    test.assert_eq(s.bad, true)
+
+@test
+fn test_a_head_scan_of_a_long_high_tag_number_does_not_overflow()
+    var s = asn1tag.head_scan()
+    s = asn1tag.head_push(s, 0x1F as u8)
+    for _ in 0..12
+        s = asn1tag.head_push(s, 0xFF as u8)
+    test.assert_eq(s.bad, true)
+
+@test
+fn test_a_head_scan_of_an_honest_eight_byte_length_is_done()
+    var s = asn1tag.head_scan()
+    s = asn1tag.head_push(s, 0x30 as u8)
+    s = asn1tag.head_push(s, 0x88 as u8)
+    for k in 0..8
+        s = asn1tag.head_push(s, (if k == 7 then 5 else 0) as u8)
+    test.assert_eq(s.done, true)
+    test.assert_eq(s.len, 5)

@@ -20,6 +20,9 @@ stability   = "experimental"
 # needs.
 layer       = "core"
 
+# `asn1tag` is the module the device build covers; the other five take and answer `Str`, `Bytes` and `Cursor`, which the embedded runtime does not define.
+host_modules = ["asn1read", "asn1univ", "asn1oid", "asn1write", "asn1pkix"]
+
 category    = "encoding"
 
 tags = ["asn1", "der", "ber", "x509", "pkcs8", "oid", "certificates", "embedded", "sans-io"]

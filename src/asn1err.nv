@@ -123,6 +123,7 @@ impl Error for AsnDecodeError
     //     println(e.message())
     //     // asn1: indefinite length at byte 1 — DER requires a definite length
     // ```
+    @tier(app)
     fn message(self) -> Str
         match self
             AsnTruncated(at, need)              =>
@@ -272,6 +273,7 @@ pub enum AsnEncodeError
 impl Error for AsnEncodeError
     // Answer the one-line report.  There is no offset: nothing arrived,
     // so there is nothing to point at.
+    @tier(app)
     fn message(self) -> Str
         match self
             AsnBufferTooSmall(need, left) =>
